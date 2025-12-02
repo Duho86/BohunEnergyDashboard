@@ -1,0 +1,22 @@
+{
+  "2021": {
+    "baseline": 12000.0,
+    "is_target": true
+  },
+  "2022": {
+    "baseline": 11800.0,
+    "is_target": true
+  },
+  "2023": {
+    "baseline": 11500.0,
+    "is_target": true
+  },
+  "2024": {
+    "baseline": 11200.0,
+    "is_target": false
+  },
+  "2025": {
+    "baseline": 11000.0,
+    "is_target": false
+  }
+}
