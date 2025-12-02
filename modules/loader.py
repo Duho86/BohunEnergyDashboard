@@ -183,7 +183,7 @@ def normalize_energy_dataframe(
             id_vars=id_vars,
             value_vars=month_cols,
             var_name="month_col",
-            value_name="에너지사용량",
+            value_name="월별에너지사용량"",
         )
     except Exception as e:
         raise EnergyDataError(f"월별 데이터 구조를 변환하는 중 오류가 발생했습니다: {e}")
