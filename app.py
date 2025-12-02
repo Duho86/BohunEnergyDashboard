@@ -32,11 +32,12 @@ BASELINE_PATH = DATA_DIR / "baseline.json"
 # ============================
 
 def ensure_dirs():
+    """data/ 및 data/energy/ 폴더 보장."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     loader.ensure_energy_dir(ENERGY_DIR)
 
 
-def load_baseline_map(path: Path = BASELINE_PATH) -> dict[int, float]:
+def load_baseline_map(path: Path = BASELINE_PATH):
     """
     baseline.json을 읽어 {연도: 기준배출량} 딕셔너리로 반환.
     파일이 없거나 형식이 안 맞으면 빈 dict 반환.
@@ -50,7 +51,7 @@ def load_baseline_map(path: Path = BASELINE_PATH) -> dict[int, float]:
     except Exception:
         return {}
 
-    baseline_map: dict[int, float] = {}
+    baseline_map = {}
     for year_str, info in raw.items():
         try:
             year = int(year_str)
@@ -68,9 +69,9 @@ def load_all_energy_data(base_dir: Path = ENERGY_DIR):
     파일 메타 정보와 에러 목록도 함께 반환.
     """
     ensure_dirs()
-    dfs: list[pd.DataFrame] = []
-    meta_list: list[dict] = []
-    errors: list[dict] = []
+    dfs = []
+    meta_list = []
+    errors = []
 
     for xlsx_path in sorted(base_dir.glob("*.xlsx")):
         try:
@@ -183,9 +184,15 @@ with upload_col1:
             except Exception as e:
                 st.error(f"{f.name} 업로드 처리 중 알 수 없는 오류가 발생했습니다: {e}")
 
-# 새 파일을 처리했으면 전체 앱을 새로 돌려서 그래프/지표에 반영
+# 새 파일을 처리했으면 앱을 다시 실행 (버전별 호환 처리)
 if new_file_processed:
-    st.experimental_rerun()
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        # 일부 구버전 대응
+        st.experimental_rerun()
+    # 둘 다 없으면 그냥 아래 코드 진행
+
 
 with upload_col2:
     st.markdown("#### 저장된 연도별 파일 목록")
@@ -294,7 +301,7 @@ with kpi_col4:
     if ratio_to_baseline is not None and not pd.isna(ratio_to_baseline):
         st.metric("기준배출량 대비 배출비율", f"{ratio_to_baseline * 100:,.1f} %")
     else:
-        st.metric("기준배출량 대비 배출비율", "기준배출량 대비 배출비율", "기준배출량 정보 없음")
+        st.metric("기준배출량 대비 배출비율", "기준배출량 정보 없음")
 
 
 # ============================
