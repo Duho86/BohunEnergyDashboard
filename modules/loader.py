@@ -158,51 +158,69 @@ def normalize_energy_dataframe(
 
     columns = list(df_raw.columns)
 
+    # 1) 기관명 / 시설 컬럼 찾기
     facility_col = _find_facility_column(columns)
     if facility_col is None:
         raise EnergyDataError(
             "기관/시설을 나타내는 컬럼을 찾을 수 없습니다. (예: '기관명', '시설명', '시설내역')"
         )
 
+    # 2) 온실가스 환산량 컬럼 찾기
     ghg_col = _find_ghg_column(columns)
     if ghg_col is None:
         raise EnergyDataError(
             "['온실가스 환산량'] 컬럼을 찾을 수 없습니다. (예: '온실가스 환산량\\n(tCO2eq)')"
         )
 
+    # 3) 월별 에너지 사용량 컬럼 찾기
     month_cols = _find_month_columns(columns)
     if not month_cols:
         raise EnergyDataError(
             "월별 에너지 사용량 컬럼을 찾을 수 없습니다. (예: '에너지사용량', '에너지사용량.1' 등)"
         )
 
+    # 4) melt용 id_vars
     id_vars = [c for c in [facility_col, ghg_col] if c in df_raw.columns]
+
+    # 4-1) value_name이 기존 컬럼과 겹치지 않도록 임시 이름 사용
+    value_tmp_col = "__energy_value__"
+    while value_tmp_col in df_raw.columns:
+        value_tmp_col += "_x"
 
     try:
         df_melted = df_raw.melt(
             id_vars=id_vars,
             value_vars=month_cols,
             var_name="month_col",
-            value_name="에너지사용량",
+            value_name=value_tmp_col,  # 임시 이름
         )
     except Exception as e:
         raise EnergyDataError(f"월별 데이터 구조를 변환하는 중 오류가 발생했습니다: {e}")
 
+    # 5) month_col → 월 번호(1~12) 매핑
     month_map = {col: idx for idx, col in enumerate(month_cols, start=1)}
     df_melted["월"] = df_melted["month_col"].map(month_map)
+
+    # 월 정보가 없는 행 제거
     df_melted = df_melted.dropna(subset=["월"])
+
+    # 중간 컬럼 제거
     df_melted = df_melted.drop(columns=["month_col"])
 
+    # 6) 컬럼명 표준화
     df_melted = df_melted.rename(
         columns={
             facility_col: "기관명",
             ghg_col: "온실가스 환산량",
+            value_tmp_col: "에너지사용량",  # 여기서 최종 이름으로 변경
         }
     )
 
+    # 7) 연도 및 파일명 컬럼 추가
     df_melted["연도"] = int(year)
     df_melted["source_file"] = source_filename
 
+    # 8) 완전 비어 있는 행 제거
     df_melted = df_melted.dropna(subset=["에너지사용량", "기관명"], how="all")
 
     if df_melted.empty:
@@ -211,6 +229,7 @@ def normalize_energy_dataframe(
     df_std = df_melted[["연도", "기관명", "월", "에너지사용량", "온실가스 환산량", "source_file"]]
 
     return df_std
+
 
 
 # ===========================
