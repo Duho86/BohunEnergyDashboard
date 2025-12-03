@@ -82,8 +82,6 @@ def load_raw_year_data(year: int):
 if "processed_uploads" not in st.session_state:
     st.session_state["processed_uploads"] = set()
 
-ensure_dirs()
-
 baseline_records = baseline_mod.load_baseline_records(BASELINE_PATH)
 baseline_map = baseline_mod.get_baseline_map(baseline_records)
 
