@@ -78,7 +78,7 @@ def detect_year_from_dataframe(df: pd.DataFrame) -> Optional[int]:
     if df.empty:
         return None
 
-    # '연도'라는 컬럼이 있는 경우 우선
+    # '연도' 컬럼 우선
     for col in df.columns:
         if "연도" in str(col):
             year_series = df[col].dropna()
@@ -120,7 +120,7 @@ def detect_year(df: pd.DataFrame, filename: str) -> int:
 def _find_ghg_column(columns: List[str]) -> Optional[str]:
     """
     '온실가스'와 '환산'이 모두 포함된 컬럼명을 탐색.
-    (예: '온실가스 환산량\n(tCO2eq)')
+    (예: '온실가스 환산량\\n(tCO2eq)')
     """
     for col in columns:
         normalized = str(col).replace("\n", "")
@@ -162,6 +162,46 @@ def _find_month_columns(columns: List[str]) -> List[str]:
 
 
 # ===========================
+# 숫자 컬럼 전처리 유틸
+# ===========================
+
+_PLACEHOLDER_VALUES = {"", " ", "-", "--", "—", "N/A", "NA", "NaN", "nan"}
+
+
+def clean_numeric_series(
+    s: pd.Series,
+    treat_placeholders_as_zero: bool = True,
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    숫자로 계산해야 하는 Series를 안전하게 float로 변환한다.
+
+    1) "", 공백, "-", N/A 등 placeholder 값 처리
+    2) pd.to_numeric(errors="coerce") 로 강제 변환
+    3) 숫자로 변환 실패한 위치의 bool mask 반환
+
+    반환:
+        (cleaned_series, invalid_mask)
+    """
+    # 우선 문자열로 통일
+    s_obj = s.astype("object")
+
+    # placeholder 처리
+    mask_placeholder = s_obj.isin(_PLACEHOLDER_VALUES)
+    if treat_placeholders_as_zero:
+        s_obj = s_obj.mask(mask_placeholder, 0)
+    else:
+        s_obj = s_obj.mask(mask_placeholder, pd.NA)
+
+    # 숫자 변환
+    s_num = pd.to_numeric(s_obj, errors="coerce")
+
+    # 변환 실패한 위치 (placeholder 제외, 진짜 이상값)
+    invalid_mask = s_obj.notna() & s_num.isna()
+
+    return s_num.astype("float64"), invalid_mask
+
+
+# ===========================
 # 엑셀 구조 사전 진단 함수
 # ===========================
 
@@ -175,8 +215,8 @@ def validate_excel_structure(
     반환 값:
         {
           "ok": bool,
-          "issues": [str, ...],    # 반드시 수정해야 하는 문제
-          "warnings": [str, ...],  # 참고용 경고
+          "issues": [str, ...],    # 반드시 수정해야 하는 문제(업로드 차단)
+          "warnings": [str, ...],  # 참고용 경고(업로드 허용)
           "detected_facility_col": Optional[str],
           "detected_ghg_col": Optional[str],
           "detected_month_cols": List[str],
@@ -205,7 +245,7 @@ def validate_excel_structure(
     ghg_col = _find_ghg_column(columns)
     month_cols = _find_month_columns(columns)
 
-    # 1) 필수 컬럼류 존재 여부
+    # 1) 필수 컬럼 존재 여부 (누락 시 업로드 차단)
     if facility_col is None:
         issues.append(
             "기관/시설명을 나타내는 컬럼을 찾을 수 없습니다. "
@@ -233,39 +273,38 @@ def validate_excel_structure(
             f"(발견된 컬럼: {month_cols}) 실제 12개월이 모두 포함되었는지 확인해 주세요."
         )
 
-    # 2) 숫자형이어야 하는 컬럼의 이상치 점검
+    # 2) 숫자형 컬럼의 이상값 점검 (업로드는 허용, 경고만 노출)
     # 온실가스 환산량
     if ghg_col is not None and ghg_col in df_raw.columns:
         s = df_raw[ghg_col]
-        s_num = pd.to_numeric(s, errors="coerce")
-        invalid_mask = s.notna() & s_num.isna()
+        _, invalid_mask = clean_numeric_series(s, treat_placeholders_as_zero=True)
         invalid_cnt = int(invalid_mask.sum())
         if invalid_cnt > 0:
             sample_vals = s[invalid_mask].astype(str).head(5).tolist()
-            issues.append(
-                f"온실가스 환산량 컬럼('{ghg_col}')에 숫자가 아닌 값이 {invalid_cnt}개 포함되어 있습니다. "
+            warnings.append(
+                f"온실가스 환산량 컬럼('{ghg_col}')에 숫자로 변환할 수 없는 값이 "
+                f"{invalid_cnt}개 있습니다. 해당 값은 계산 시 NaN으로 처리됩니다. "
                 f"예시 값: {sample_vals}"
             )
 
     # 월별 에너지 사용량 컬럼들
-    invalid_month_cols: List[str] = []
+    invalid_month_msgs: List[str] = []
     for mc in month_cols:
         if mc not in df_raw.columns:
             continue
         s = df_raw[mc]
-        s_num = pd.to_numeric(s, errors="coerce")
-        invalid_mask = s.notna() & s_num.isna()
+        _, invalid_mask = clean_numeric_series(s, treat_placeholders_as_zero=True)
         invalid_cnt = int(invalid_mask.sum())
         if invalid_cnt > 0:
-            invalid_month_cols.append(f"{mc} (이상값 {invalid_cnt}개)")
+            invalid_month_msgs.append(f"'{mc}' (이상값 {invalid_cnt}개)")
 
-    if invalid_month_cols:
-        issues.append(
-            "다음 월별 에너지 사용량 컬럼에 숫자가 아닌 값이 포함되어 있습니다: "
-            + ", ".join(invalid_month_cols)
+    if invalid_month_msgs:
+        warnings.append(
+            "다음 월별 에너지 사용량 컬럼에 숫자로 변환할 수 없는 값이 있습니다. "
+            "해당 값은 계산 시 NaN으로 처리됩니다: "
+            + ", ".join(invalid_month_msgs)
         )
 
-    # 3) 결과 정리
     ok = len(issues) == 0
 
     return {
@@ -352,7 +391,7 @@ def normalize_energy_dataframe(
 
     id_vars = [c for c in [facility_col, ghg_col] if c in df_raw.columns]
 
-    # value_name이 기존 컬럼명과 겹치면 안 되므로 임시 이름 사용
+    # value_name 이 기존 컬럼명과 겹치지 않도록 임시 이름 사용
     value_tmp_col = "__energy_value__"
     while value_tmp_col in df_raw.columns:
         value_tmp_col += "_x"
@@ -385,6 +424,21 @@ def normalize_energy_dataframe(
             value_tmp_col: "에너지사용량",
         }
     )
+
+    # 🔢 숫자 컬럼 전처리: 에너지사용량, 온실가스 환산량
+    energy_clean, energy_invalid = clean_numeric_series(
+        df_melted["에너지사용량"], treat_placeholders_as_zero=True
+    )
+    ghg_clean, ghg_invalid = clean_numeric_series(
+        df_melted["온실가스 환산량"], treat_placeholders_as_zero=True
+    )
+
+    df_melted["에너지사용량"] = energy_clean
+    df_melted["온실가스 환산량"] = ghg_clean
+
+    # 전처리 결과(이상값 개수)를 attrs 로 남겨두면 필요시 디버깅에 활용 가능
+    df_melted.attrs["invalid_energy_count"] = int(energy_invalid.sum())
+    df_melted.attrs["invalid_ghg_count"] = int(ghg_invalid.sum())
 
     # 연도 및 파일명 컬럼 추가
     df_melted["연도"] = int(year)
@@ -425,12 +479,16 @@ def load_energy_xlsx(
 
     # 1단계: 엑셀 구조 사전 진단
     validation = validate_excel_structure(df_raw, filename=path.name)
+
+    # 필수 구조 문제(issue)가 있으면 업로드 중단
     if not validation["ok"]:
         issue_lines = "\n".join(f"- {msg}" for msg in validation["issues"])
         raise EnergyDataError(
             "엑셀 구조 점검에서 다음 문제가 발견되었습니다. "
             "엑셀 양식을 수정한 후 다시 업로드해 주세요.\n" + issue_lines
         )
+
+    # 경고(warning)는 업로드 허용 + 사용자에게만 알림 (app.py의 디버그 탭에서 확인 가능)
 
     # 2단계: 연도 인식
     year = detect_year(df_raw, path.name)
@@ -439,7 +497,7 @@ def load_energy_xlsx(
     df_std = normalize_energy_dataframe(df_raw, year=year, source_filename=path.name)
 
     # 필수 컬럼 최종 검증
-    required_cols = {"기관명", "월", "온실가스 환산량"}
+    required_cols = {"기관명", "월", "온실가스 환산량", "에너지사용량"}
     missing = required_cols - set(df_std.columns)
     if missing:
         raise EnergyDataError(f"표준 스키마에서 필수 컬럼이 누락되었습니다: {missing}")
