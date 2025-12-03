@@ -1,518 +1,360 @@
 # modules/loader.py
 # -*- coding: utf-8 -*-
 
-import os
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Optional, Tuple, Union, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
+# ============================================================
+# 예외 정의
+# ============================================================
+
+
 class EnergyDataError(Exception):
-    """에너지 사용량 데이터 처리 중 발생하는 공통 예외."""
-    pass
+    """에너지 사용량 엑셀 처리 중 발생하는 도메인 예외."""
 
 
-# ===========================
-# 경로/저장 관련 유틸
-# ===========================
+# ============================================================
+# 유틸 / 기본 설정
+# ============================================================
 
-def ensure_energy_dir(base_dir: Union[str, Path] = "data/energy") -> Path:
+ENERGY_FILENAME_YEAR_PATTERN = re.compile(r"(\d{4})")
+
+
+def ensure_energy_dir(base_dir: Path) -> None:
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _extract_year_from_filename(filename: str) -> int:
     """
-    data/energy 폴더가 없으면 생성하고, Path 객체를 반환한다.
+    파일명에서 연도(YYYY)를 추출.
+    예: '2024년 에너지 사용량관리.xlsx' → 2024
     """
-    base_path = Path(base_dir)
-    base_path.mkdir(parents=True, exist_ok=True)
-    return base_path
+    m = ENERGY_FILENAME_YEAR_PATTERN.search(filename)
+    if not m:
+        raise EnergyDataError(f"파일명에서 연도를 찾을 수 없습니다: {filename}")
+    year = int(m.group(1))
+    if year < 2000 or year > 2100:
+        raise EnergyDataError(f"비정상 연도({year})가 파일명에서 추출되었습니다: {filename}")
+    return year
 
 
-def save_xlsx_file(
-    file_obj: BinaryIO,
-    original_filename: str,
-    base_dir: Union[str, Path] = "data/energy",
-) -> Path:
+# ============================================================
+# 헤더/컬럼 탐지 & 숫자 전처리
+# ============================================================
+
+def _apply_two_row_header(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    업로드된 .xlsx 파일을 data/energy/ 폴더에 저장한다.
+    원본 엑셀의 1행(시설내역...) + 2행(진행상태/사업군/소속기관명...) 구조에서
+    2행을 실제 컬럼명으로 사용하는 형태로 변환.
+
+    - df_raw: pd.read_excel(..., header=None) 으로 읽은 원본
+    - 반환: 0행을 컬럼명으로 올리고, 데이터는 1행부터 사용하는 DataFrame
     """
-    energy_dir = ensure_energy_dir(base_dir)
+    if df_raw.empty:
+        raise EnergyDataError("엑셀 원본이 비어 있습니다.")
 
-    if not original_filename.lower().endswith(".xlsx"):
-        raise EnergyDataError("지원하지 않는 파일 형식입니다. .xlsx 파일만 업로드해 주세요.")
+    header = df_raw.iloc[0].astype(str).str.strip()
+    df = df_raw.iloc[1:].copy()
+    df.columns = header
 
-    safe_name = os.path.basename(original_filename)
-    dest_path = energy_dir / safe_name
+    # 공백/NaN 컬럼명 제거 및 공백 제거
+    df = df.loc[:, df.columns.notna()]
+    df = df.rename(columns=lambda c: str(c).strip())
 
-    if hasattr(file_obj, "seek"):
-        file_obj.seek(0)
-
-    try:
-        data = file_obj.read()
-    except Exception as e:
-        raise EnergyDataError(f"업로드된 파일을 읽는 중 오류가 발생했습니다: {e}")
-
-    if not data:
-        raise EnergyDataError("업로드된 파일이 비어 있습니다.")
-
-    with open(dest_path, "wb") as out:
-        out.write(data)
-
-    return dest_path
+    return df
 
 
-# ===========================
-# 연도 인식 로직
-# ===========================
+def _detect_facility_column(columns) -> Optional[str]:
+    """
+    소속기관명 컬럼을 찾는다.
+    우선순위:
+    1) 컬럼명이 정확히 '소속기관명'
+    2) '소속기관' 또는 '기관명' 문자열이 포함된 컬럼
+    3) 그래도 없으면 첫 번째 컬럼 (fallback)
+    """
+    cols = [str(c).strip() for c in columns]
 
-YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
+    for c in cols:
+        if c == "소속기관명":
+            return c
 
+    for c in cols:
+        if ("소속기관" in c) or ("기관명" in c):
+            return c
 
-def detect_year_from_filename(filename: str) -> Optional[int]:
-    match = YEAR_PATTERN.search(filename)
-    if not match:
-        return None
-    return int(match.group(0))
-
-
-def detect_year_from_dataframe(df: pd.DataFrame) -> Optional[int]:
-    if df.empty:
-        return None
-
-    # '연도' 컬럼 우선
-    for col in df.columns:
-        if "연도" in str(col):
-            year_series = df[col].dropna()
-            if not year_series.empty:
-                val = str(year_series.iloc[0])
-                match = YEAR_PATTERN.search(val)
-                if match:
-                    return int(match.group(0))
-
-    # 그 외 셀에서 연도 패턴 탐색
-    sample = df.head(10)
-    for col in sample.columns:
-        for v in sample[col].astype(str):
-            match = YEAR_PATTERN.search(v)
-            if match:
-                return int(match.group(0))
-
-    return None
+    return cols[0] if cols else None
 
 
-def detect_year(df: pd.DataFrame, filename: str) -> int:
-    year = detect_year_from_filename(filename)
-    if year is not None:
-        return year
+NON_NUMERIC_SENTINELS = {"-", "_", "", " ", "N/A", "n/a", "NaN", "nan", "NULL", "null"}
 
-    year = detect_year_from_dataframe(df)
-    if year is not None:
-        return year
 
-    raise EnergyDataError(
-        f"연도를 인식할 수 없습니다. 파일명 또는 시트 내에 연도를 확인해 주세요. (filename={filename})"
+def _coerce_numeric_series(s: pd.Series, col_name: str) -> Tuple[pd.Series, int]:
+    """
+    문자열/공백/대시 등을 모두 숫자로 전처리하여 float 시리즈로 변환.
+    - 변환 실패한 값 개수를 함께 반환.
+    """
+    original = s.copy()
+
+    # 먼저 문자열로 변환 후, 콤마 제거 및 sentinel 값 처리
+    s_clean = (
+        s.astype(str)
+        .str.strip()
+        .replace(list(NON_NUMERIC_SENTINELS), pd.NA)
+        .str.replace(",", "", regex=False)
     )
 
+    numeric = pd.to_numeric(s_clean, errors="coerce")
+    numeric = numeric.astype("float64")
 
-# ===========================
-# 컬럼 식별/정규화 유틸
-# ===========================
+    failed_mask = numeric.isna() & original.notna() & (original.astype(str).str.strip() != "")
+    failed_count = int(failed_mask.sum())
 
-def _find_ghg_column(columns: List[str]) -> Optional[str]:
+    return numeric, failed_count
+
+
+# ============================================================
+# 표준 스키마 변환
+# ============================================================
+
+def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
     """
-    '온실가스'와 '환산'이 모두 포함된 컬럼명을 탐색.
-    (예: '온실가스 환산량\\n(tCO2eq)')
+    '20xx년 에너지 사용량관리.xlsx' 1개 파일을
+    표준 스키마 DataFrame(연도, 기관명, 월, 온실가스 환산량)으로 변환.
+
+    - 헤더 2행 구조:
+        row0: 시설내역/에너지사용량 등 그룹 헤더
+        row1: 진행상태/사업군/소속기관명/연면적/시설구분/연료/1월/2월/…
     """
-    for col in columns:
-        normalized = str(col).replace("\n", "")
-        if "온실가스" in normalized and "환산" in normalized:
-            return col
-    return None
 
+    # 1) 헤더 정리
+    df = _apply_two_row_header(df_raw)
 
-def _find_facility_column(columns: List[str]) -> Optional[str]:
-    """
-    기관/시설 이름 컬럼을 탐색.
-    """
-    for col in columns:
-        c = str(col)
-        if "기관명" in c:
-            return col
-    for col in columns:
-        c = str(col)
-        if "시설명" in c:
-            return col
-    for col in columns:
-        c = str(col)
-        if "시설내역" in c:
-            return col
-    return None
+    # 2) 기관명 컬럼 찾기
+    facility_col = _detect_facility_column(df.columns)
+    if facility_col is None:
+        raise EnergyDataError("소속기관명 컬럼을 찾지 못했습니다.")
 
+    # 3) 월 컬럼 찾기 (예: '1월' ~ '12월')
+    month_cols: List[str] = [
+        c
+        for c in df.columns
+        if isinstance(c, str)
+        and c.endswith("월")
+        and c[0].isdigit()
+    ]
+    if not month_cols:
+        raise EnergyDataError("월별 에너지 사용량 컬럼(1월~12월)을 찾을 수 없습니다.")
 
-def _find_month_columns(columns: List[str]) -> List[str]:
-    """
-    '에너지'와 '사용량'이 모두 포함된 월별 사용량 컬럼들을 탐색.
-    (예: '에너지사용량', '에너지사용량.1', ...)
-    """
-    month_cols: List[str] = []
-    for col in columns:
-        c = str(col)
-        if "에너지" in c and "사용량" in c:
-            month_cols.append(col)
-    return month_cols
+    # 4) 온실가스 환산량(연간 또는 합계) 컬럼 탐지
+    ghg_col: Optional[str] = None
+    for c in df.columns:
+        sc = str(c)
+        if "온실가스" in sc and "환산" in sc:
+            ghg_col = c
+            break
+    if ghg_col is None:
+        # 최소한 '온실가스' 가 포함된 컬럼이라도 시도
+        for c in df.columns:
+            sc = str(c)
+            if "온실가스" in sc:
+                ghg_col = c
+                break
 
+    # 5) 숫자 컬럼 전처리 (월별)
+    for c in month_cols:
+        df[c], _ = _coerce_numeric_series(df[c], c)
 
-# ===========================
-# 숫자 컬럼 전처리 유틸
-# ===========================
-
-_PLACEHOLDER_VALUES = {"", " ", "-", "--", "—", "N/A", "NA", "NaN", "nan"}
-
-
-def clean_numeric_series(
-    s: pd.Series,
-    treat_placeholders_as_zero: bool = True,
-) -> Tuple[pd.Series, pd.Series]:
-    """
-    숫자로 계산해야 하는 Series를 안전하게 float로 변환한다.
-
-    1) "", 공백, "-", N/A 등 placeholder 값 처리
-    2) pd.to_numeric(errors="coerce") 로 강제 변환
-    3) 숫자로 변환 실패한 위치의 bool mask 반환
-
-    반환:
-        (cleaned_series, invalid_mask)
-    """
-    # 우선 문자열로 통일
-    s_obj = s.astype("object")
-
-    # placeholder 처리
-    mask_placeholder = s_obj.isin(_PLACEHOLDER_VALUES)
-    if treat_placeholders_as_zero:
-        s_obj = s_obj.mask(mask_placeholder, 0)
+    # 6) 온실가스 환산량(연간) 전처리
+    if ghg_col is not None:
+        df[ghg_col], _ = _coerce_numeric_series(df[ghg_col], ghg_col)
     else:
-        s_obj = s_obj.mask(mask_placeholder, pd.NA)
+        df[ghg_col] = pd.NA  # type: ignore[index]
 
-    # 숫자 변환
-    s_num = pd.to_numeric(s_obj, errors="coerce")
+    # 7) 행별 월 사용량 합계 → 비율 계산용
+    df["row_energy_sum"] = df[month_cols].sum(axis=1, skipna=True)
 
-    # 변환 실패한 위치 (placeholder 제외, 진짜 이상값)
-    invalid_mask = s_obj.notna() & s_num.isna()
+    # 8) 월별 long 포맷으로 변환
+    melted = df.melt(
+        id_vars=[facility_col, "row_energy_sum", ghg_col] if ghg_col is not None else [facility_col, "row_energy_sum"],
+        value_vars=month_cols,
+        var_name="월",
+        value_name="에너지사용량",
+    )
 
-    return s_num.astype("float64"), invalid_mask
+    # 9) '1월' → 1
+    melted["월"] = melted["월"].astype(str).str.replace("월", "", regex=False)
+    melted["월"] = pd.to_numeric(melted["월"], errors="coerce").astype("Int64")
 
+    # 10) 월별 온실가스 환산량 배분
+    #     - 전제: df[ghg_col]은 "해당 행 전체(연간 또는 합계) 온실가스 환산량"
+    #     - 로직: 각 월 에너지 사용량 비율로 나누어 월별 온실가스 환산량을 분배
+    if ghg_col is not None:
+        melted["row_ghg_total"] = melted[ghg_col]
+    else:
+        melted["row_ghg_total"] = pd.NA
 
-# ===========================
-# 엑셀 구조 사전 진단 함수
-# ===========================
+    melted["온실가스 환산량"] = pd.NA
 
-def validate_excel_structure(
-    df_raw: pd.DataFrame,
-    filename: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    엑셀 시트 구조를 사전 점검한다.
+    mask = (
+        melted["row_energy_sum"].notna()
+        & (melted["row_energy_sum"] > 0)
+        & melted["row_ghg_total"].notna()
+        & (melted["row_ghg_total"] >= 0)
+    )
 
-    반환 값:
+    melted.loc[mask, "온실가스 환산량"] = (
+        melted.loc[mask, "에너지사용량"] / melted.loc[mask, "row_energy_sum"]
+        * melted.loc[mask, "row_ghg_total"]
+    )
+
+    # 11) 표준 스키마 구성
+    result = pd.DataFrame(
         {
-          "ok": bool,
-          "issues": [str, ...],    # 반드시 수정해야 하는 문제(업로드 차단)
-          "warnings": [str, ...],  # 참고용 경고(업로드 허용)
-          "detected_facility_col": Optional[str],
-          "detected_ghg_col": Optional[str],
-          "detected_month_cols": List[str],
-          "filename": Optional[str],
+            "연도": year,
+            "기관명": melted[facility_col].astype(str).str.strip(),
+            "월": melted["월"],
+            "온실가스 환산량": melted["온실가스 환산량"],
         }
+    )
+
+    # NaN 월/기관명 행 제거
+    result = result.dropna(subset=["월", "기관명"])
+
+    return result.reset_index(drop=True)
+
+
+# ============================================================
+# 업로드 파일 처리
+# ============================================================
+
+def load_energy_xlsx(path: Path) -> Tuple[pd.DataFrame, int]:
     """
-    issues: List[str] = []
-    warnings: List[str] = []
-
-    if df_raw is None or df_raw.empty:
-        issues.append("시트에 데이터가 없거나, 모든 행이 비어 있습니다.")
-        return {
-            "ok": False,
-            "issues": issues,
-            "warnings": warnings,
-            "detected_facility_col": None,
-            "detected_ghg_col": None,
-            "detected_month_cols": [],
-            "filename": filename,
-        }
-
-    columns = list(df_raw.columns)
-    col_names = [str(c) for c in columns]
-
-    facility_col = _find_facility_column(columns)
-    ghg_col = _find_ghg_column(columns)
-    month_cols = _find_month_columns(columns)
-
-    # 1) 필수 컬럼 존재 여부 (누락 시 업로드 차단)
-    if facility_col is None:
-        issues.append(
-            "기관/시설명을 나타내는 컬럼을 찾을 수 없습니다. "
-            "예상 컬럼명 예시: '기관명', '시설명', '시설내역'. "
-            f"현재 컬럼: {col_names}"
-        )
-
-    if ghg_col is None:
-        issues.append(
-            "온실가스 환산량 컬럼을 찾을 수 없습니다. "
-            "예상: '온실가스 환산량\\n(tCO2eq)' 등 '온실가스'와 '환산'이 모두 포함된 컬럼. "
-            f"현재 컬럼: {col_names}"
-        )
-
-    if not month_cols:
-        issues.append(
-            "월별 에너지 사용량 컬럼을 찾을 수 없습니다. "
-            "예상: 이름에 '에너지'와 '사용량'이 모두 포함된 1~12개 컬럼 "
-            "(예: '에너지사용량', '에너지사용량.1' 등). "
-            f"현재 컬럼: {col_names}"
-        )
-    elif len(month_cols) < 12:
-        warnings.append(
-            f"월별 에너지 사용량으로 추정되는 컬럼이 {len(month_cols)}개만 발견되었습니다. "
-            f"(발견된 컬럼: {month_cols}) 실제 12개월이 모두 포함되었는지 확인해 주세요."
-        )
-
-    # 2) 숫자형 컬럼의 이상값 점검 (업로드는 허용, 경고만 노출)
-    # 온실가스 환산량
-    if ghg_col is not None and ghg_col in df_raw.columns:
-        s = df_raw[ghg_col]
-        _, invalid_mask = clean_numeric_series(s, treat_placeholders_as_zero=True)
-        invalid_cnt = int(invalid_mask.sum())
-        if invalid_cnt > 0:
-            sample_vals = s[invalid_mask].astype(str).head(5).tolist()
-            warnings.append(
-                f"온실가스 환산량 컬럼('{ghg_col}')에 숫자로 변환할 수 없는 값이 "
-                f"{invalid_cnt}개 있습니다. 해당 값은 계산 시 NaN으로 처리됩니다. "
-                f"예시 값: {sample_vals}"
-            )
-
-    # 월별 에너지 사용량 컬럼들
-    invalid_month_msgs: List[str] = []
-    for mc in month_cols:
-        if mc not in df_raw.columns:
-            continue
-        s = df_raw[mc]
-        _, invalid_mask = clean_numeric_series(s, treat_placeholders_as_zero=True)
-        invalid_cnt = int(invalid_mask.sum())
-        if invalid_cnt > 0:
-            invalid_month_msgs.append(f"'{mc}' (이상값 {invalid_cnt}개)")
-
-    if invalid_month_msgs:
-        warnings.append(
-            "다음 월별 에너지 사용량 컬럼에 숫자로 변환할 수 없는 값이 있습니다. "
-            "해당 값은 계산 시 NaN으로 처리됩니다: "
-            + ", ".join(invalid_month_msgs)
-        )
-
-    ok = len(issues) == 0
-
-    return {
-        "ok": ok,
-        "issues": issues,
-        "warnings": warnings,
-        "detected_facility_col": facility_col,
-        "detected_ghg_col": ghg_col,
-        "detected_month_cols": month_cols,
-        "filename": filename,
-    }
-
-
-def validate_excel_file(path: Union[str, Path]) -> Dict[str, Any]:
+    저장된 '20xx년 에너지 사용량관리.xlsx' 파일을 읽어
+    (표준 스키마 DataFrame, 연도) 를 반환.
     """
-    개별 엑셀 파일(path)에 대해 시트 구조를 진단한다.
-    (디버깅/진단 탭에서 사용)
-    """
-    path = Path(path)
     if not path.exists():
-        return {
-            "ok": False,
-            "issues": [f"파일을 찾을 수 없습니다: {path}"],
-            "warnings": [],
-            "detected_facility_col": None,
-            "detected_ghg_col": None,
-            "detected_month_cols": [],
-            "filename": path.name,
-        }
+        raise EnergyDataError(f"파일이 존재하지 않습니다: {path}")
+
+    year = _extract_year_from_filename(path.name)
 
     try:
-        df_raw = pd.read_excel(path, sheet_name=0)
-    except Exception as e:
-        return {
-            "ok": False,
-            "issues": [f"엑셀 파일을 읽는 중 오류가 발생했습니다: {e}"],
-            "warnings": [],
-            "detected_facility_col": None,
-            "detected_ghg_col": None,
-            "detected_month_cols": [],
-            "filename": path.name,
-        }
-
-    return validate_excel_structure(df_raw, filename=path.name)
-
-
-# ===========================
-# 정규화(melt) 로직
-# ===========================
-
-def normalize_energy_dataframe(
-    df_raw: pd.DataFrame,
-    year: int,
-    source_filename: str,
-) -> pd.DataFrame:
-    """
-    원본 엑셀(df_raw)을 표준 스키마(연도/기관명/월/에너지사용량/온실가스 환산량)로 변환.
-    """
-    if df_raw is None or df_raw.empty:
-        raise EnergyDataError("엑셀 시트에 데이터가 없거나, 모두 비어 있습니다.")
-
-    columns = list(df_raw.columns)
-
-    facility_col = _find_facility_column(columns)
-    if facility_col is None:
-        raise EnergyDataError(
-            "기관/시설을 나타내는 컬럼을 찾을 수 없습니다. "
-            "(예: '기관명', '시설명', '시설내역')"
-        )
-
-    ghg_col = _find_ghg_column(columns)
-    if ghg_col is None:
-        raise EnergyDataError(
-            "['온실가스 환산량'] 컬럼을 찾을 수 없습니다. "
-            "(예: '온실가스 환산량\\n(tCO2eq)')"
-        )
-
-    month_cols = _find_month_columns(columns)
-    if not month_cols:
-        raise EnergyDataError(
-            "월별 에너지 사용량 컬럼을 찾을 수 없습니다. "
-            "(예: '에너지사용량', '에너지사용량.1' 등)"
-        )
-
-    id_vars = [c for c in [facility_col, ghg_col] if c in df_raw.columns]
-
-    # value_name 이 기존 컬럼명과 겹치지 않도록 임시 이름 사용
-    value_tmp_col = "__energy_value__"
-    while value_tmp_col in df_raw.columns:
-        value_tmp_col += "_x"
-
-    try:
-        df_melted = df_raw.melt(
-            id_vars=id_vars,
-            value_vars=month_cols,
-            var_name="month_col",
-            value_name=value_tmp_col,  # 임시 이름
-        )
-    except Exception as e:
-        raise EnergyDataError(f"월별 데이터 구조를 변환하는 중(melt) 오류가 발생했습니다: {e}")
-
-    # month_col → 월 번호(1~12) 매핑
-    month_map = {col: idx for idx, col in enumerate(month_cols, start=1)}
-    df_melted["월"] = df_melted["month_col"].map(month_map)
-
-    # 월 정보가 없는 행 제거
-    df_melted = df_melted.dropna(subset=["월"])
-
-    # 중간 컬럼 제거
-    df_melted = df_melted.drop(columns=["month_col"])
-
-    # 컬럼명 표준화
-    df_melted = df_melted.rename(
-        columns={
-            facility_col: "기관명",
-            ghg_col: "온실가스 환산량",
-            value_tmp_col: "에너지사용량",
-        }
-    )
-
-    # 🔢 숫자 컬럼 전처리: 에너지사용량, 온실가스 환산량
-    energy_clean, energy_invalid = clean_numeric_series(
-        df_melted["에너지사용량"], treat_placeholders_as_zero=True
-    )
-    ghg_clean, ghg_invalid = clean_numeric_series(
-        df_melted["온실가스 환산량"], treat_placeholders_as_zero=True
-    )
-
-    df_melted["에너지사용량"] = energy_clean
-    df_melted["온실가스 환산량"] = ghg_clean
-
-    # 전처리 결과(이상값 개수)를 attrs 로 남겨두면 필요시 디버깅에 활용 가능
-    df_melted.attrs["invalid_energy_count"] = int(energy_invalid.sum())
-    df_melted.attrs["invalid_ghg_count"] = int(ghg_invalid.sum())
-
-    # 연도 및 파일명 컬럼 추가
-    df_melted["연도"] = int(year)
-    df_melted["source_file"] = source_filename
-
-    # 완전 비어 있는 행 제거
-    df_melted = df_melted.dropna(subset=["에너지사용량", "기관명"], how="all")
-
-    if df_melted.empty:
-        raise EnergyDataError("정규화 후 남은 유효 데이터가 없습니다. 엑셀 내용을 다시 확인해 주세요.")
-
-    df_std = df_melted[["연도", "기관명", "월", "에너지사용량", "온실가스 환산량", "source_file"]]
-
-    return df_std
-
-
-# ===========================
-# 공개용 상위 함수
-# ===========================
-
-def load_energy_xlsx(
-    path: Union[str, Path],
-) -> Tuple[pd.DataFrame, int]:
-    """
-    1) 엑셀 읽기
-    2) 구조 사전 진단 (validate_excel_structure)
-    3) 연도 인식
-    4) 표준 스키마 정규화
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {path}")
-
-    try:
-        df_raw = pd.read_excel(path, sheet_name=0)
+        # header=None 으로 읽어서 2행 헤더 구조를 그대로 가져간다.
+        df_raw = pd.read_excel(path, sheet_name=0, header=None)
     except Exception as e:
         raise EnergyDataError(f"엑셀 파일을 읽는 중 오류가 발생했습니다: {e}")
 
-    # 1단계: 엑셀 구조 사전 진단
-    validation = validate_excel_structure(df_raw, filename=path.name)
-
-    # 필수 구조 문제(issue)가 있으면 업로드 중단
-    if not validation["ok"]:
-        issue_lines = "\n".join(f"- {msg}" for msg in validation["issues"])
-        raise EnergyDataError(
-            "엑셀 구조 점검에서 다음 문제가 발견되었습니다. "
-            "엑셀 양식을 수정한 후 다시 업로드해 주세요.\n" + issue_lines
-        )
-
-    # 경고(warning)는 업로드 허용 + 사용자에게만 알림 (app.py의 디버그 탭에서 확인 가능)
-
-    # 2단계: 연도 인식
-    year = detect_year(df_raw, path.name)
-
-    # 3단계: 표준 스키마 변환
-    df_std = normalize_energy_dataframe(df_raw, year=year, source_filename=path.name)
-
-    # 필수 컬럼 최종 검증
-    required_cols = {"기관명", "월", "온실가스 환산량", "에너지사용량"}
-    missing = required_cols - set(df_std.columns)
-    if missing:
-        raise EnergyDataError(f"표준 스키마에서 필수 컬럼이 누락되었습니다: {missing}")
+    try:
+        df_std = normalize_energy_dataframe(df_raw, year)
+    except EnergyDataError:
+        raise
+    except Exception as e:
+        raise EnergyDataError(f"엑셀 데이터를 표준 스키마로 변환하는 중 오류: {e}")
 
     return df_std, year
 
 
 def process_uploaded_energy_file(
-    file_obj: BinaryIO,
+    file_obj,
     original_filename: str,
-    base_dir: Union[str, Path] = "data/energy",
+    base_dir: Path,
 ) -> Tuple[pd.DataFrame, int, Path]:
     """
-    Streamlit 업로드 파일을 저장 → 구조 점검 → 표준 스키마 정규화까지 수행.
+    Streamlit file_uploader 로 업로드된 파일을 data/energy/ 에 저장하고,
+    구조를 검증한 뒤 표준 스키마 DataFrame을 반환.
+
+    - file_obj: st.uploaded_file
+    - original_filename: 사용자가 업로드한 원본 파일명
     """
-    saved_path = save_xlsx_file(file_obj, original_filename, base_dir=base_dir)
-    df_std, year = load_energy_xlsx(saved_path)
-    return df_std, year, saved_path
+    ensure_energy_dir(base_dir)
+
+    year = _extract_year_from_filename(original_filename)
+    save_path = base_dir / original_filename
+
+    # 파일 저장
+    try:
+        with open(save_path, "wb") as f:
+            f.write(file_obj.getbuffer())
+    except Exception as e:
+        raise EnergyDataError(f"업로드 파일을 저장하는 중 오류가 발생했습니다: {e}")
+
+    # 저장 후 구조 검증 & 표준 스키마 변환 시도
+    try:
+        df_std, _ = load_energy_xlsx(save_path)
+    except Exception:
+        # 실패 시 저장된 파일을 삭제할지 여부는 정책에 따라 결정
+        raise
+
+    return df_std, year, save_path
+
+
+# ============================================================
+# 구조 진단 (디버그/테스트용)
+# ============================================================
+
+def validate_excel_file(path: Path) -> Dict[str, Any]:
+    """
+    엑셀 1개 파일 구조 진단.
+    - 어떤 컬럼을 기관명으로 인식했는지
+    - 월 컬럼은 몇 개 인식했는지
+    - 온실가스 환산량 컬럼은 무엇인지
+    등을 리턴
+    """
+    result: Dict[str, Any] = {
+        "filename": path.name,
+        "ok": False,
+        "issues": [],
+        "warnings": [],
+        "detected_facility_col": None,
+        "detected_month_cols": [],
+        "detected_ghg_col": None,
+    }
+
+    if not path.exists():
+        result["issues"].append("파일이 존재하지 않습니다.")
+        return result
+
+    try:
+        df_raw = pd.read_excel(path, sheet_name=0, header=None)
+    except Exception as e:
+        result["issues"].append(f"엑셀 읽기 오류: {e}")
+        return result
+
+    try:
+        df = _apply_two_row_header(df_raw)
+    except Exception as e:
+        result["issues"].append(f"헤더 처리 오류: {e}")
+        return result
+
+    facility_col = _detect_facility_column(df.columns)
+    month_cols = [
+        c
+        for c in df.columns
+        if isinstance(c, str) and c.endswith("월") and c[0].isdigit()
+    ]
+    ghg_col = None
+    for c in df.columns:
+        sc = str(c)
+        if "온실가스" in sc and "환산" in sc:
+            ghg_col = c
+            break
+
+    if facility_col is None:
+        result["issues"].append("소속기관명 컬럼을 찾을 수 없습니다.")
+    if not month_cols:
+        result["issues"].append("1월~12월 월별 에너지사용량 컬럼을 찾을 수 없습니다.")
+    if ghg_col is None:
+        result["warnings"].append("온실가스 환산량(tCO2eq) 컬럼을 찾지 못했습니다.")
+
+    result["detected_facility_col"] = facility_col
+    result["detected_month_cols"] = month_cols
+    result["detected_ghg_col"] = ghg_col
+
+    result["ok"] = len(result["issues"]) == 0
+    return result
