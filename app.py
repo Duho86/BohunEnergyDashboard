@@ -4,6 +4,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+import traceback  # 상세 오류 출력용
 
 import pandas as pd
 import streamlit as st
@@ -108,12 +109,7 @@ def get_year_metrics(
     annual_total_with_baseline: pd.DataFrame,
 ):
     """
-    선택 연도에 대한
-    - actual_emission (실제 배출량)
-    - baseline_emission
-    - reduction_rate_pct
-    - ratio_to_baseline
-    를 하나의 헬퍼로 가져오기.
+    선택 연도에 대한 주요 지표를 한 번에 가져오기.
     """
     row_total = annual_total[annual_total["연도"] == year]
     row_base = annual_total_with_baseline[
@@ -171,6 +167,7 @@ with upload_col1:
                 continue
 
             try:
+                # loader 내부에서 엑셀 구조 사전 진단 + 정규화까지 수행
                 _, year, saved_path = loader.process_uploaded_energy_file(
                     file_obj=f,
                     original_filename=f.name,
@@ -180,8 +177,10 @@ with upload_col1:
                 st.success(f"{f.name} (연도: {year}) 업로드 및 저장 완료")
                 new_file_processed = True
             except loader.EnergyDataError as e:
-                st.error(f"{f.name} 업로드 처리 중 오류: {e}")
+                # 엑셀 구조 문제 등 사용자가 수정할 수 있는 에러
+                st.error(f"{f.name} 업로드 처리 중 오류:\n{e}")
             except Exception as e:
+                # 예기치 못한 오류
                 st.error(f"{f.name} 업로드 처리 중 알 수 없는 오류가 발생했습니다: {e}")
 
 # 새 파일을 처리했으면 앱을 다시 실행 (버전별 호환 처리)
@@ -189,7 +188,6 @@ if new_file_processed:
     if hasattr(st, "rerun"):
         st.rerun()
     elif hasattr(st, "experimental_rerun"):
-        # 일부 구버전 대응
         st.experimental_rerun()
     # 둘 다 없으면 그냥 아래 코드 진행
 
@@ -219,6 +217,7 @@ st.markdown("---")
 
 if df_all is None or df_all.empty:
     st.warning("아직 분석할 에너지 사용량 데이터가 없습니다. 상단에서 파일을 업로드해 주세요.")
+    # 데이터 진단 섹션은 아래에서 계속 쓸 수 있도록 stop 하지 않고 바로 아래 코드로 가지 않도록 return
     st.stop()
 
 # ============================
@@ -229,6 +228,11 @@ try:
     datasets = analyzer.build_dashboard_datasets(df_all, baseline_map=baseline_map)
 except Exception as e:
     st.error(f"데이터 집계 중 오류가 발생했습니다: {e}")
+
+    # 개발/디버그용 상세 스택 트레이스
+    with st.expander("자세한 오류 정보 보기 (개발용)"):
+        st.code(traceback.format_exc())
+
     st.stop()
 
 monthly_by_agency = datasets["monthly_by_agency"]
@@ -396,9 +400,45 @@ else:
     st.write(feedback_text)
 
 # ============================
-# (옵션) 원본 데이터 미리보기
+# 데이터 구조 진단 (개발/테스트용)
 # ============================
 
+st.markdown("---")
+st.markdown("### 데이터 구조 진단 (개발/테스트용)")
+
+st.caption(
+    "data/energy 폴더에 저장된 모든 엑셀 파일에 대해 "
+    "사전 구조 진단(validate_excel_structure)을 수행합니다. "
+    "새로운 양식을 적용하기 전에 이 섹션에서 먼저 점검해 보세요."
+)
+
+if st.button("data/energy 폴더 전체 구조 점검 실행"):
+    results = []
+    for xlsx_path in sorted(ENERGY_DIR.glob("*.xlsx")):
+        v = loader.validate_excel_file(xlsx_path)
+        issues_text = "\n".join(v["issues"]) if v["issues"] else ""
+        warnings_text = "\n".join(v["warnings"]) if v["warnings"] else ""
+        results.append(
+            {
+                "파일명": v.get("filename", xlsx_path.name),
+                "OK": v["ok"],
+                "이슈_개수": len(v["issues"]),
+                "경고_개수": len(v["warnings"]),
+                "기관명_컬럼": v.get("detected_facility_col"),
+                "온실가스_컬럼": v.get("detected_ghg_col"),
+                "월별_컬럼_수": len(v.get("detected_month_cols", [])),
+                "이슈_요약": issues_text,
+                "경고_요약": warnings_text,
+            }
+        )
+
+    if results:
+        df_check = pd.DataFrame(results)
+        st.dataframe(df_check)
+    else:
+        st.info("data/energy 폴더에 검사할 엑셀 파일이 없습니다.")
+
+# (옵션) 표준 스키마 미리보기
 with st.expander("표준 스키마 데이터 미리보기 (디버깅용)"):
     st.write(df_all.head())
     st.caption("※ loader.normalize_energy_dataframe() 결과를 concat한 전체 데이터입니다.")
