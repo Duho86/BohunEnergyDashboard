@@ -218,6 +218,10 @@ with tab_dashboard:
     V_col   = raw_df.columns[21]   # V열
     W_col   = raw_df.columns[22]   # W열
 
+    # --- U/V/W 숫자 강제 변환 (오류 방지용) ---
+    for c in [U_col, V_col, W_col]:
+        raw_df[c] = pd.to_numeric(raw_df[c], errors="coerce")
+
     # 공단 전체 U/V/W 합계
     total_U = raw_df[U_col].sum(skipna=True)
     total_V = raw_df[V_col].sum(skipna=True)
@@ -229,7 +233,10 @@ with tab_dashboard:
     for y in past_years:
         df_past = load_raw_year_data(y)
         if df_past is not None:
-            past_vals.append(df_past[df_past.columns[20]].sum(skipna=True))
+            # 과거년도도 동일하게 U열 숫자 변환 후 합산
+            past_U_col = df_past.columns[20]
+            df_past[past_U_col] = pd.to_numeric(df_past[past_U_col], errors="coerce")
+            past_vals.append(df_past[past_U_col].sum(skipna=True))
 
     if len(past_vals) >= 1:
         past_avg = sum(past_vals) / len(past_vals)
@@ -305,13 +312,17 @@ with tab_dashboard:
         for y in past_years:
             dfp = load_raw_year_data(y)
             if dfp is not None:
-                val = dfp[dfp[dfp.columns[2]]==name][dfp.columns[20]].sum()
+                org_c = dfp.columns[2]
+                U_c   = dfp.columns[20]
+                # 과거년도 U열도 숫자 변환
+                dfp[U_c] = pd.to_numeric(dfp[U_c], errors="coerce")
+                val = dfp[dfp[org_c] == name][U_c].sum(skipna=True)
                 past_vals.append(val)
 
-        if len(past_vals)>=1:
+        if len(past_vals) >= 1:
             avg_p = sum(past_vals)/len(past_vals)
             now = df_group[df_group["기관명"]==name]["U합계"].iloc[0]
-            if avg_p>0:
+            if avg_p > 0:
                 return (now-avg_p)/avg_p*100
         return None
 
@@ -358,16 +369,16 @@ with tab_dashboard:
 
     if baseline_val:
         need = total_V - baseline_val
-        need = need if need>0 else 0
+        need = need if need > 0 else 0
         df_fb["권장감축량"] = need * (df_fb["U합계"]/total_U)
     else:
         df_fb["권장감축량"] = None
 
     def need_reason(row):
         if (
-            row["3개년증감률"] is not None and row["3개년증감률"]>0
+            row["3개년증감률"] is not None and row["3개년증감률"] > 0
         ) or (
-            row["평균대비사용비율"] is not None and row["평균대비사용비율"]>1
+            row["평균대비사용비율"] is not None and row["평균대비사용비율"] > 1
         ):
             return "O"
         return "X"
