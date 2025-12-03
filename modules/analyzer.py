@@ -190,7 +190,6 @@ def build_dashboard_datasets(
 ) -> dict:
     """
     대시보드에서 바로 사용할 수 있는 집계 결과들을 한 번에 계산해 반환.
-    문제 발생 시 어느 단계에서 오류가 났는지 메시지에 포함.
     """
     _ensure_not_empty(df_std, "표준 스키마")
 
@@ -219,14 +218,12 @@ def build_dashboard_datasets(
             annual_total,
             baseline_map=baseline_map,
         )
-    except Exception as e:
-        # baseline 관련 문제는 대시보드 전체를 죽이지 않고 메시지로만 안내
+    except Exception:
+        # baseline 관련 문제는 대시보드 전체를 죽이지 않고 메시지로만 안내할 수 있도록
         annual_total_with_baseline = annual_total.copy()
         annual_total_with_baseline["기준배출량"] = pd.NA
         annual_total_with_baseline["배출비율"] = pd.NA
         annual_total_with_baseline["감축률(%)"] = pd.NA
-        # 오류는 상위에서 메시지로 볼 수 있게 하려면 raise 대신 로그/경고 처리도 가능
-        # 여기서는 조용히 fallback.
 
     recent5_total, recent5_years = get_recent_years_ghg(annual_total)
 
