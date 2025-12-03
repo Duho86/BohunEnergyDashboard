@@ -50,19 +50,27 @@ def _extract_year_from_filename(filename: str) -> int:
 
 def _apply_two_row_header(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    원본 엑셀의 1행(시설내역...) + 2행(진행상태/사업군/소속기관명...) 구조에서
-    2행을 실제 컬럼명으로 사용하는 형태로 변환.
+    원본 엑셀의
+      - 1행: 시설내역 / 에너지사용량 등 그룹 헤더
+      - 2행: 진행상태 / 사업군 / 소속기관명 / 연면적 / 시설구분 / 연료 / 1월 / 2월 / …
+
+    구조에서 **2행을 실제 컬럼명**으로 사용하는 형태로 변환.
 
     - df_raw: pd.read_excel(..., header=None) 으로 읽은 원본
-    - 반환: 0행을 컬럼명으로 올리고, 데이터는 1행부터 사용하는 DataFrame
+    - 반환: 1번(두 번째) 행을 컬럼명으로 올리고, 데이터는 그 다음 행부터 사용하는 DataFrame
     """
     if df_raw.empty:
         raise EnergyDataError("엑셀 원본이 비어 있습니다.")
 
-    header = df_raw.iloc[0].astype(str).str.strip()
-    df = df_raw.iloc[1:].copy()
+    # 두 번째 행을 실제 헤더로 사용
+    if len(df_raw) < 2:
+        raise EnergyDataError("헤더로 사용할 2개 행(그룹헤더+실제헤더)이 존재하지 않습니다.")
+
+    header = df_raw.iloc[1].astype(str).str.strip()
+    df = df_raw.iloc[2:].copy()
     df.columns = header
 
+    # NaN 컬럼 제거 및 공백 제거
     df = df.loc[:, df.columns.notna()]
     df = df.rename(columns=lambda c: str(c).strip())
 
@@ -75,18 +83,27 @@ def _detect_facility_column(columns) -> Optional[str]:
     우선순위:
     1) 컬럼명이 정확히 '소속기관명'
     2) '소속기관' 또는 '기관명' 문자열이 포함된 컬럼
-    3) 그래도 없으면 첫 번째 컬럼 (fallback)
+    3) 그 외 '시설명', '건물명' 등 시설명을 나타내는 컬럼
+    4) 그래도 없으면 첫 번째 컬럼 (fallback)
     """
     cols = [str(c).strip() for c in columns]
 
+    # 1) 정확히 '소속기관명'
     for c in cols:
         if c == "소속기관명":
             return c
 
+    # 2) '소속기관' 또는 '기관명'이 들어간 컬럼
     for c in cols:
         if ("소속기관" in c) or ("기관명" in c):
             return c
 
+    # 3) 시설명 계열
+    for c in cols:
+        if ("시설명" in c) or ("건물명" in c) or ("시설내역" in c):
+            return c
+
+    # 4) 최후의 수단: 첫 번째 컬럼
     return cols[0] if cols else None
 
 
@@ -95,22 +112,30 @@ NON_NUMERIC_SENTINELS = {"-", "_", "", " ", "N/A", "n/a", "NaN", "nan", "NULL", 
 
 def _coerce_numeric_series(s: pd.Series, col_name: str) -> Tuple[pd.Series, int]:
     """
-    문자열/공백/대시 등을 모두 숫자로 전처리하여 float 시리즈로 변환.
+    문자열/공백/대시/단위 등을 모두 숫자로 전처리하여 float 시리즈로 변환.
+    - 콤마, 공백 제거
+    - '1,234 tCO2eq', '  500kWh ' 등에서도 숫자 부분만 추출
     - 변환 실패한 값 개수를 함께 반환.
     """
     original = s.copy()
 
-    s_clean = (
-        s.astype(str)
-        .str.strip()
-        .replace(list(NON_NUMERIC_SENTINELS), pd.NA)
-        .str.replace(",", "", regex=False)
-    )
+    # 문자열로 변환 후 기본 정리
+    s_str = s.astype(str).str.strip()
 
-    numeric = pd.to_numeric(s_clean, errors="coerce")
-    numeric = numeric.astype("float64")
+    # 명시적 sentinel → NaN
+    sentinel_mask = s_str.isin(NON_NUMERIC_SENTINELS)
+    s_clean = s_str.mask(sentinel_mask, pd.NA)
 
-    failed_mask = numeric.isna() & original.notna() & (original.astype(str).str.strip() != "")
+    # 콤마 제거
+    s_clean = s_clean.str.replace(",", "", regex=False)
+
+    # 숫자, 부호, 소수점 외 문자 제거 (단위/문자 제거)
+    s_clean = s_clean.str.replace(r"[^\d\.\-]", "", regex=True)
+
+    numeric = pd.to_numeric(s_clean, errors="coerce").astype("float64")
+
+    # "실제값은 뭔가 있었는데 숫자로 안 바뀐" 케이스만 실패로 카운트
+    failed_mask = numeric.isna() & s_str.notna() & (s_str != "") & (~sentinel_mask)
     failed_count = int(failed_mask.sum())
 
     return numeric, failed_count
@@ -130,7 +155,7 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
         row1: 진행상태/사업군/소속기관명/연면적/시설구분/연료/1월/2월/…
     """
 
-    # 1) 헤더 정리
+    # 1) 헤더 정리 (2행을 실제 컬럼명으로 사용)
     df = _apply_two_row_header(df_raw)
 
     # 2) 기관명 컬럼 찾기
