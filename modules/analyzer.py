@@ -24,7 +24,6 @@ def _force_numeric(s: pd.Series, col_name: str) -> pd.Series:
         s_num = pd.to_numeric(s, errors="coerce")
         return s_num.astype("float64")
     except Exception as e:
-        # 이 단계에서 다시 한 번 에러를 감싸서 어느 컬럼인지 알려줌
         raise RuntimeError(f"[숫자 변환] '{col_name}' 컬럼을 숫자로 변환하는 중 오류: {e}") from e
 
 
@@ -45,12 +44,10 @@ def get_monthly_ghg(
     try:
         df = df_std.copy()
 
-        # 연도/월/온실가스 모두 숫자 캐스팅
         df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
         df["월"] = pd.to_numeric(df["월"], errors="coerce").astype("Int64")
         df["온실가스 환산량"] = _force_numeric(df["온실가스 환산량"], "온실가스 환산량")
 
-        # 연도/월 정보가 없는 행 제거
         df = df.dropna(subset=["연도", "월"])
     except Exception as e:
         raise RuntimeError(f"[월별 집계 단계] 데이터 타입 정리 중 오류: {e}") from e
@@ -66,7 +63,7 @@ def get_monthly_ghg(
                 total = total.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
                 g = pd.concat([g, total], ignore_index=True)
 
-            return g.sort_values(["연도", "기관명", "월"]).reset_index(drop과drop=True)
+            return g.sort_values(["연도", "기관명", "월"]).reset_index(drop=True)
 
         g = df.groupby(["연도", "월"], as_index=False)["온실가스 환산량"].sum()
         g = g.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
@@ -238,7 +235,6 @@ def build_dashboard_datasets(
             baseline_map=baseline_map,
         )
     except Exception:
-        # baseline 관련 문제는 대시보드 전체를 죽이지 않고 메시지로만 안내할 수 있도록
         annual_total_with_baseline = annual_total.copy()
         annual_total_with_baseline["기준배출량"] = pd.NA
         annual_total_with_baseline["배출비율"] = pd.NA
@@ -257,7 +253,7 @@ def build_dashboard_datasets(
     }
 
 
-# 6) 전망분석 테이블 (시트1 구조 참고)
+# 6) 전망분석 테이블
 def build_projection_tables(
     annual_total: pd.DataFrame,
     annual_by_agency: pd.DataFrame,
@@ -265,15 +261,10 @@ def build_projection_tables(
     target_year: int,
 ) -> Dict[str, pd.DataFrame]:
     """
-    [전망분석]용 테이블 생성.
-
-    - 공단 전체: 엑셀 '에너지 사용량 분석.xlsx' 시트1의 2~4행 구조를 참고한 요약 테이블
-    - 소속기구별: 시트1 7~27행 구조를 참고한 기관별 표
-
-    baseline_map 은 baseline.json 의 사용자 입력값만 사용한다.
+    [전망분석]용 테이블 생성 (공단 전체 + 소속기구별)
     """
 
-    # ----- 공단 전체 (overall) -----
+    # 공단 전체
     row_total = annual_total[annual_total["연도"] == target_year]
     if row_total.empty:
         overall_df = pd.DataFrame(
@@ -310,7 +301,7 @@ def build_projection_tables(
             ]
         )
 
-    # ----- 소속기구별 (by_agency) -----
+    # 소속기구별
     df_year_agency = annual_by_agency[annual_by_agency["연도"] == target_year].copy()
     if df_year_agency.empty:
         by_agency_df = pd.DataFrame(
@@ -331,13 +322,11 @@ def build_projection_tables(
         baseline_total = baseline_map.get(target_year)
 
         if baseline_total is None or pd.isna(baseline_total) or total_actual == 0:
-            # 기준배출량 정보를 사용할 수 없는 경우: 기준/비율/감축률은 NaN
             df_year_agency["기준배출량(tCO2eq)"] = pd.NA
             df_year_agency["배출비율"] = pd.NA
             df_year_agency["감축률(%)"] = pd.NA
         else:
             baseline_total = float(baseline_total)
-            # 기관별 기준배출량 = 총 기준배출량 × 기관별 실제배출 비중
             share = df_year_agency["연간 온실가스 배출량"] / total_actual
             baseline_agency = baseline_total * share
 
@@ -358,20 +347,17 @@ def build_projection_tables(
     return {"overall": overall_df, "by_agency": by_agency_df}
 
 
-# 7) 피드백 테이블 (시트2 구조 참고)
+# 7) 피드백 테이블
 def build_feedback_tables(
     annual_total: pd.DataFrame,
     annual_by_agency: pd.DataFrame,
     target_year: int,
 ) -> Dict[str, pd.DataFrame]:
     """
-    [피드백]용 요약 테이블 생성.
-
-    - 공단 전체: 시트2 2~4행 구조를 참고한 '금년/전년/5개년 추세' 요약
-    - 소속기구별: 시트2 7~27행 구조를 참고한 기관별 금년/전년/5개년 평균 증가율
+    [피드백]용 요약 테이블 생성 (공단 전체 + 소속기구별)
     """
 
-    # ----- 공단 전체 피드백 -----
+    # 공단 전체
     df_total = annual_total.copy()
     df_total["연도"] = pd.to_numeric(df_total["연도"], errors="coerce").astype("Int64")
     df_total["연간 온실가스 배출량"] = _force_numeric(
@@ -391,14 +377,11 @@ def build_feedback_tables(
         yoy_diff = cur_val - prev_val if not pd.isna(cur_val) else pd.NA
         yoy_rate = (cur_val - prev_val) / prev_val * 100.0 if not pd.isna(cur_val) else pd.NA
 
-    # 최근 5개년 평균 증감률
     window_years = df_total[df_total["연도"] <= target_year].sort_values("연도").tail(5)
     if len(window_years) >= 2:
         window_years["prev"] = window_years["연간 온실가스 배출량"].shift(1)
         valid = window_years["prev"] > 0
-        yoy_series = (window_years["연간 온실가스 배출량"] - window_years["prev"]) / window_years[
-            "prev"
-        ] * 100.0
+        yoy_series = (window_years["연간 온실가스 배출량"] - window_years["prev"]) / window_years["prev"] * 100.0
         recent5_avg = float(yoy_series[valid].mean()) if valid.any() else pd.NA
     else:
         recent5_avg = pd.NA
@@ -416,7 +399,7 @@ def build_feedback_tables(
         ]
     )
 
-    # ----- 소속기구별 피드백 -----
+    # 소속기구별
     df_agency = annual_by_agency.copy()
     df_agency["연도"] = pd.to_numeric(df_agency["연도"], errors="coerce").astype("Int64")
     df_agency["연간 온실가스 배출량"] = _force_numeric(
@@ -432,7 +415,6 @@ def build_feedback_tables(
 
     merged = pd.merge(cur_agency, prev_agency, on="기관명", how="outer")
 
-    # 전년 대비 증감량/증감률
     merged["전년 대비 증감량(tCO2eq)"] = merged["금년 배출량(tCO2eq)"] - merged["전년 배출량(tCO2eq)"]
     merged["전년 대비 증감률(%)"] = (
         (merged["금년 배출량(tCO2eq)"] - merged["전년 배출량(tCO2eq)"])
@@ -441,7 +423,6 @@ def build_feedback_tables(
     )
     merged.loc[merged["전년 배출량(tCO2eq)"] <= 0, "전년 대비 증감률(%)"] = pd.NA
 
-    # 최근 5개년 평균 증가율(기관별)
     start_year = target_year - 4
     window = df_agency[(df_agency["연도"] >= start_year) & (df_agency["연도"] <= target_year)]
 
