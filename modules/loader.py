@@ -1,474 +1,325 @@
-# app.py
+# modules/loader.py
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-
-from datetime import datetime
+import re
 from pathlib import Path
-import traceback
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import streamlit as st
-
-from modules import loader, analyzer, feedback, baseline as baseline_mod
 
 
-# ============================
+# ============================================================
+# 예외 정의
+# ============================================================
+
+class EnergyDataError(Exception):
+    """에너지 사용량 엑셀 처리 중 발생하는 도메인 예외."""
+
+
+# ============================================================
 # 기본 설정
-# ============================
-
-st.set_page_config(
-    page_title="공단 에너지 사용량 · 온실가스 관리 대시보드",
-    layout="wide",
-)
-
-st.title("공단 에너지 사용량 · 온실가스 관리 대시보드")
-
-
-DATA_DIR = Path("data")
-ENERGY_DIR = DATA_DIR / "energy"
-BASELINE_PATH = DATA_DIR / "baseline.json"
-
-
-# ============================
-# 데이터 로딩 헬퍼
-# ============================
-
-def load_all_energy_data(base_dir: Path = ENERGY_DIR):
-    """
-    저장된 모든 연도 파일을 로드하여
-    - 표준 스키마 데이터 df_all
-    - 파일 메타 정보
-    - 로딩 오류 목록
-    을 반환한다.
-
-    주의: ensure_dirs() 호출 금지
-    """
-    dfs = []
-    meta_list = []
-    errors = []
-
-    for xlsx_path in sorted(base_dir.glob("*.xlsx")):
-        try:
-            df_std, year = loader.load_energy_xlsx(xlsx_path)
-            dfs.append(df_std)
-
-            stat = xlsx_path.stat()
-            meta_list.append({
-                "연도": year,
-                "파일명": xlsx_path.name,
-                "경로": str(xlsx_path),
-                "업로드시간": datetime.fromtimestamp(stat.st_mtime).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            })
-        except loader.EnergyDataError as e:
-            errors.append({"파일명": xlsx_path.name, "에러": str(e)})
-        except Exception as e:
-            errors.append({"파일명": xlsx_path.name, "에러": f"알 수 없는 오류: {e}"})
-
-    df_all = pd.concat(dfs, ignore_index=True) if dfs else None
-    return df_all, meta_list, errors
-
-
-# ======================================
-# U/V/W 원본 분석용 로딩 함수
-# ======================================
-
-def load_raw_year_data(year: int):
-    for p in ENERGY_DIR.glob("*.xlsx"):
-        if str(year) in p.name:
-            return loader.load_energy_raw_for_analysis(p)
-    return None
-
-
-# ============================
-# 세션 상태
-# ============================
-
-if "processed_uploads" not in st.session_state:
-    st.session_state["processed_uploads"] = set()
-
-# baseline 로드
-baseline_records = baseline_mod.load_baseline_records(BASELINE_PATH)
-baseline_map = baseline_mod.get_baseline_map(baseline_records)
-
-
-# ============================
-# 탭 구성
-# ============================
-
-tab_dashboard, tab_baseline, tab_debug = st.tabs(
-    ["📊 대시보드", "⚙️ 기준배출량 관리", "🔧 디버그/진단"]
-)
-
-# ============================================================
-# 📊 1) 대시보드 탭
 # ============================================================
 
-with tab_dashboard:
+ENERGY_FILENAME_YEAR_PATTERN = re.compile(r"(\d{4})")
 
-    # -----------------------------
-    # 진행중 기능 반영 현황 표시
-    # -----------------------------
-    with st.expander("🛠️ 현재 진행 중인 기능 반영 현황"):
-        st.markdown("""
-        # 🔧 기능 반영 현황
 
-        **1. 기존 기능 변경**
-        - 기존 전망분석 섹션 삭제
-        - 기존 피드백 섹션 대부분 제거 (마지막 전체 코멘트만 유지)
+def ensure_energy_dir(base_dir: Path) -> None:
+    base_dir.mkdir(parents=True, exist_ok=True)
 
-        **2. 신규 기능 — 에너지 사용량 분석(U/V/W)**
-        - 공단 전체 에너지 사용량(U)
-        - 면적당 온실가스 배출량(V)
-        - 3개년 평균 대비 증감률
-        - 시설군별(W열 평균) 분석
-        - 소속기구별 에너지 분석 표
 
-        **3. 신규 — 에너지 기반 피드백**
-        - 공단 전체: 현재 월 / 목표달성 감축률(V 대비 기준배출량)
-        - 소속기구별: 분포순위 / 증가율 / 평균 대비 / 권장 감축량 / 증가 사유 제출
+def _extract_year_from_filename(filename: str) -> int:
+    """
+    파일명에서 연도(YYYY)를 추출.
+    예: '2024년 에너지 사용량관리.xlsx' → 2024
+    """
+    m = ENERGY_FILENAME_YEAR_PATTERN.search(filename)
+    if not m:
+        raise EnergyDataError(f"파일명에서 연도를 찾을 수 없습니다: {filename}")
+    year = int(m.group(1))
+    if year < 2000 or year > 2100:
+        raise EnergyDataError(f"비정상 연도({year})가 파일명에서 추출되었습니다: {filename}")
+    return year
 
-        **4. 공통 기능**
-        - 기관 순서 고정
-        - 표 전체폭으로 출력
-        """)
 
-    # ------------------------------
-    # 파일 업로드
-    # ------------------------------
-    st.markdown("### 월별 에너지 사용량 파일 업로드")
+# ============================================================
+# 헤더/컬럼 처리 함수
+# ============================================================
 
-    upload_col1, upload_col2 = st.columns([1.2, 2])
-    new_file_processed = False
+def _apply_two_row_header(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    원본 엑셀 구조 :
+      row0 : 시설내역/에너지사용량 등 그룹 헤더
+      row1 : 진행상태 / 사업군 / 소속기관명 / 연면적 / 시설구분 / 연료 / 1월 / 2월 / …
 
-    with upload_col1:
-        uploaded_files = st.file_uploader(
-            "에너지 사용량관리 .xlsx 파일 업로드",
-            type=["xlsx"],
-            accept_multiple_files=True,
-        )
+    → row1을 실제 컬럼 헤더로 사용
+    """
+    if df_raw.empty:
+        raise EnergyDataError("엑셀 원본이 비어 있습니다.")
 
-        if uploaded_files:
-            for f in uploaded_files:
-                if f.name in st.session_state["processed_uploads"]:
-                    continue
-                try:
-                    # 업로드 및 표준 스키마 변환
-                    _, year, saved_path = loader.process_uploaded_energy_file(
-                        file_obj=f,
-                        original_filename=f.name,
-                        base_dir=ENERGY_DIR,
-                    )
-                    st.session_state["processed_uploads"].add(f.name)
-                    st.success(f"{f.name} ({year}) 업로드 완료")
-                    new_file_processed = True
-                except Exception as e:
-                    st.error(f"업로드 오류: {e}")
+    if len(df_raw) < 2:
+        raise EnergyDataError("2개 행(그룹헤더 + 실제헤더)이 존재해야 합니다.")
 
-        if new_file_processed:
-            st.rerun()
+    header = df_raw.iloc[1].astype(str).str.strip()
+    df = df_raw.iloc[2:].copy()
+    df.columns = header
 
-    # 저장된 파일 목록
-    with upload_col2:
-        st.markdown("#### 저장된 파일 목록")
+    df = df.loc[:, df.columns.notna()]
+    df = df.rename(columns=lambda c: str(c).strip())
 
-        df_all, files_meta, load_errors = load_all_energy_data()
+    return df
 
-        if files_meta:
-            df_files = pd.DataFrame(files_meta).sort_values(
-                ["연도", "업로드시간"], ascending=[False, False]
-            )
-            st.table(df_files[["연도", "파일명", "업로드시간"]])
-        else:
-            st.info("저장된 파일 없음")
 
-    st.markdown("---")
+def _detect_facility_column(columns) -> Optional[str]:
+    """
+    소속기관명 / 기관명 / 소속기관 / 시설명 / 건물명 등 탐지
+    """
+    cols = [str(c).strip() for c in columns]
 
-    if df_all is None:
-        st.warning("에너지 사용량 데이터가 없습니다.")
-        st.stop()
+    # 우선순위 1: 정확히 '소속기관명'
+    for c in cols:
+        if c == "소속기관명":
+            return c
 
-    # -----------------------------
-    # KPI용 온실가스 집계
-    # -----------------------------
-    datasets = analyzer.build_dashboard_datasets(df_all, baseline_map)
+    # 우선순위 2: '소속기관' 또는 '기관명' 문자열 포함
+    for c in cols:
+        if ("소속기관" in c) or ("기관명" in c):
+            return c
 
-    # -----------------------------
-    # 연도 선택
-    # -----------------------------
-    years = sorted(df_all["연도"].unique().tolist())
-    selected_year = max(years)
-    selected_year = st.sidebar.selectbox("연도 선택", years, index=years.index(selected_year))
+    # 우선순위 3: 시설명 계열
+    for c in cols:
+        if ("시설명" in c) or ("건물명" in c) or ("시설내역" in c):
+            return c
 
-    # ============================================================
-    # 🔥 주요지표 — 에너지 사용량 분석
-    # ============================================================
+    # 최후 수단: 첫 번째 컬럼
+    return cols[0] if cols else None
 
-    st.markdown("## 에너지 사용량 추이")
 
-    raw_df = load_raw_year_data(selected_year)
-    if raw_df is None:
-        st.error(f"{selected_year}년 원본 파일을 찾을 수 없습니다.")
-        st.stop()
+NON_NUMERIC_SENTINELS = {"-", "_", "", " ", "N/A", "NULL", "null", "nan", "NaN"}
 
-    org_col = raw_df.columns[2]    # C열
-    U_col   = raw_df.columns[20]   # U열
-    V_col   = raw_df.columns[21]   # V열
-    W_col   = raw_df.columns[22]   # W열
 
-    # 공단 전체 U/V/W 합계
-    total_U = raw_df[U_col].sum(skipna=True)
-    total_V = raw_df[V_col].sum(skipna=True)
+def _coerce_numeric_series(s: pd.Series, col_name: str) -> Tuple[pd.Series, int]:
+    """
+    문자열·단위(kWh, tCO2eq 등) 제거하고 float로 변환.
+    """
+    s_str = s.astype(str).str.strip()
 
-    # 3개년 평균 대비 증감률
-    past_years = [selected_year - 3, selected_year - 2, selected_year - 1]
-    past_vals = []
+    sentinel_mask = s_str.isin(NON_NUMERIC_SENTINELS)
+    s_clean = s_str.mask(sentinel_mask, pd.NA)
 
-    for y in past_years:
-        df_past = load_raw_year_data(y)
-        if df_past is not None:
-            past_vals.append(df_past[df_past.columns[20]].sum(skipna=True))
+    # 콤마 제거
+    s_clean = s_clean.str.replace(",", "", regex=False)
 
-    if len(past_vals) >= 1:
-        past_avg = sum(past_vals) / len(past_vals)
-        U_change_rate = (total_U - past_avg) / past_avg * 100 if past_avg else None
+    # 숫자 / 소수점 / 부호만 추출
+    s_clean = s_clean.str.replace(r"[^\d\.\-]", "", regex=True)
+
+    numeric = pd.to_numeric(s_clean, errors="coerce").astype("float64")
+
+    failed_mask = numeric.isna() & s_str.notna() & (~sentinel_mask)
+    failed = int(failed_mask.sum())
+
+    return numeric, failed
+
+
+# ============================================================
+# 표준 스키마 변환
+# ============================================================
+
+def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
+    """
+    '20xx년 에너지 사용량관리.xlsx' → 표준 스키마(연도, 기관명, 월, 온실가스 환산량)
+    """
+    df = _apply_two_row_header(df_raw)
+
+    facility_col = _detect_facility_column(df.columns)
+    if facility_col is None:
+        raise EnergyDataError("소속기관명 컬럼을 찾지 못했습니다.")
+
+    # 월 컬럼 찾기 ('1월' ~ '12월')
+    month_cols = [
+        c for c in df.columns
+        if isinstance(c, str) and c.endswith("월") and c[0].isdigit()
+    ]
+    if not month_cols:
+        raise EnergyDataError("월별 에너지 사용량(1월~12월) 컬럼을 찾지 못했습니다.")
+
+    # 온실가스 환산량
+    ghg_col = None
+    for c in df.columns:
+        if "온실가스" in str(c) and "환산" in str(c):
+            ghg_col = c
+            break
+    if ghg_col is None:
+        for c in df.columns:
+            if "온실가스" in str(c):
+                ghg_col = c
+                break
+
+    # 숫자 전처리
+    for c in month_cols:
+        df[c], _ = _coerce_numeric_series(df[c], c)
+
+    if ghg_col is not None:
+        df[ghg_col], _ = _coerce_numeric_series(df[ghg_col], ghg_col)
+
+    # 행별 합계
+    df["row_energy_sum"] = df[month_cols].sum(axis=1, skipna=True)
+
+    id_vars = [facility_col, "row_energy_sum"]
+    if ghg_col:
+        id_vars.append(ghg_col)
+
+    melted = df.melt(
+        id_vars=id_vars,
+        value_vars=month_cols,
+        var_name="월",
+        value_name="에너지사용량",
+    )
+
+    melted["월"] = melted["월"].str.replace("월", "", regex=False)
+    melted["월"] = pd.to_numeric(melted["월"], errors="coerce").astype("Int64")
+
+    if ghg_col:
+        melted["row_ghg_total"] = melted[ghg_col]
     else:
-        past_avg = None
-        U_change_rate = None
+        melted["row_ghg_total"] = pd.NA
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric("에너지 사용량(U 합계)", f"{total_U:,.0f}")
-    k2.metric("면적당 온실가스 배출량(V 합계)", f"{total_V:,.0f}")
-    k3.metric("3개년 평균 대비 증감률", "-" if U_change_rate is None else f"{U_change_rate:,.1f}%")
+    melted["온실가스 환산량"] = pd.NA
 
-    # ============================================================
-    # 시설군별 W 평균
-    # ============================================================
+    mask = (
+        melted["row_energy_sum"].notna()
+        & (melted["row_energy_sum"] > 0)
+        & melted["row_ghg_total"].notna()
+    )
 
-    st.markdown("### 시설군별 평균 에너지 사용량(W열)")
+    melted.loc[mask, "온실가스 환산량"] = (
+        melted.loc[mask, "에너지사용량"]
+        / melted.loc[mask, "row_energy_sum"]
+        * melted.loc[mask, "row_ghg_total"]
+    )
 
-    MEDICAL = ["중앙병원","부산병원","광주병원","대구병원","대전병원","인천병원"]
-    WELFARE = ["수원요양원","광주요양원","김해요양원","대구요양원","대전요양원","남양주요양원","원주요양원","전주요양원"]
-    OTHER   = ["본사","교육연구원","보훈원","재활체육센터","휴양원"]
+    result = pd.DataFrame({
+        "연도": year,
+        "기관명": melted[facility_col].astype(str).str.strip(),
+        "월": melted["월"],
+        "온실가스 환산량": melted["온실가스 환산량"],
+    })
 
-    def avg_group(names):
-        return raw_df[raw_df[org_col].isin(names)][W_col].mean()
+    result = result.dropna(subset=["월", "기관명"]).reset_index(drop=True)
+    return result
 
-    g1,g2,g3 = st.columns(3)
-    g1.metric("의료시설 평균(W)", f"{avg_group(MEDICAL):,.1f}")
-    g2.metric("복지시설 평균(W)", f"{avg_group(WELFARE):,.1f}")
-    g3.metric("기타시설 평균(W)", f"{avg_group(OTHER):,.1f}")
 
-    # ============================================================
-    # 소속기구별 에너지 분석
-    # ============================================================
+# ============================================================
+# U/V/W 원본 분석용 로더 (신규 기능)
+# ============================================================
 
-    st.markdown("## 소속기구별 에너지 사용 분석")
+def load_energy_raw_for_analysis(path: Path) -> pd.DataFrame:
+    """
+    '에너지 사용량관리.xlsx' 원본 시트를 원래 구조 그대로 가져오되,
+    2행(실제 헤더)을 컬럼명으로 하는 DataFrame을 반환.
 
-    df_group = raw_df.groupby(org_col).agg(
-        U합계=(U_col, "sum"),
-        V합계=(V_col, "sum"),
-        W평균=(W_col, "mean"),
-    ).reset_index().rename(columns={org_col: "기관명"})
+    → U/V/W 컬럼 분석에 필수
+    """
+    if not path.exists():
+        raise EnergyDataError(f"파일이 존재하지 않습니다: {path}")
 
-    # 시설구분
-    def facility_type(name):
-        if name in MEDICAL: return "의료시설"
-        if name in WELFARE: return "복지시설"
-        if name in OTHER:   return "기타시설"
-        return "기타시설"
+    try:
+        df_raw = pd.read_excel(path, sheet_name=0, header=None)
+    except Exception as e:
+        raise EnergyDataError(f"엑셀 파일 읽기 오류: {e}")
 
-    df_group["시설구분"] = df_group["기관명"].apply(facility_type)
+    header = df_raw.iloc[1].astype(str).str.strip()
+    df = df_raw.iloc[2:].copy()
+    df.columns = header
 
-    # 공단 전체 대비 분포비율
-    df_group["분포비율"] = df_group["U합계"] / total_U * 100 if total_U else None
+    return df.reset_index(drop=True)
 
-    # 시설군별 평균 대비 비율
-    med_avg = avg_group(MEDICAL)
-    wel_avg = avg_group(WELFARE)
-    oth_avg = avg_group(OTHER)
 
-    def avg_compare(row):
-        if row["시설구분"]=="의료시설":
-            return row["W평균"]/med_avg if med_avg else None
-        if row["시설구분"]=="복지시설":
-            return row["W평균"]/wel_avg if wel_avg else None
-        return row["W평균"]/oth_avg if oth_avg else None
+# ============================================================
+# 업로드 처리 / 변환
+# ============================================================
 
-    df_group["평균대비사용비율"] = df_group.apply(avg_compare, axis=1)
+def load_energy_xlsx(path: Path) -> Tuple[pd.DataFrame, int]:
+    """표준 스키마 로딩"""
+    year = _extract_year_from_filename(path.name)
 
-    # 3개년 증가율
-    def three_year_rate(name):
-        past_vals = []
-        for y in past_years:
-            dfp = load_raw_year_data(y)
-            if dfp is not None:
-                val = dfp[dfp[dfp.columns[2]]==name][dfp.columns[20]].sum()
-                past_vals.append(val)
+    try:
+        df_raw = pd.read_excel(path, sheet_name=0, header=None)
+    except Exception as e:
+        raise EnergyDataError(f"엑셀 읽기 오류: {e}")
 
-        if len(past_vals)>=1:
-            avg_p = sum(past_vals)/len(past_vals)
-            now = df_group[df_group["기관명"]==name]["U합계"].iloc[0]
-            if avg_p>0:
-                return (now-avg_p)/avg_p*100
-        return None
+    try:
+        df_std = normalize_energy_dataframe(df_raw, year)
+    except Exception as e:
+        raise EnergyDataError(f"표준 스키마 변환 오류: {e}")
 
-    df_group["3개년증감률"] = df_group["기관명"].apply(three_year_rate)
+    return df_std, year
 
-    # 기관 순서 고정
-    ORDER = [
-        "본사","중앙병원","부산병원","광주병원","대구병원","대전병원","인천병원",
-        "교육연구원","보훈원","수원요양원","광주요양원","김해요양원","대구요양원",
-        "대전요양원","남양주요양원","원주요양원","전주요양원",
-        "재활체육센터","휴양원"
+
+def process_uploaded_energy_file(file_obj, original_filename: str, base_dir: Path):
+    ensure_energy_dir(base_dir)
+
+    year = _extract_year_from_filename(original_filename)
+    save_path = base_dir / original_filename
+
+    try:
+        with open(save_path, "wb") as f:
+            f.write(file_obj.getbuffer())
+    except Exception as e:
+        raise EnergyDataError(f"파일 저장 오류: {e}")
+
+    df_std, _ = load_energy_xlsx(save_path)
+    return df_std, year, save_path
+
+
+# ============================================================
+# 구조 진단
+# ============================================================
+
+def validate_excel_file(path: Path) -> Dict[str, Any]:
+    result = {
+        "filename": path.name,
+        "ok": False,
+        "issues": [],
+        "warnings": [],
+        "detected_facility_col": None,
+        "detected_month_cols": [],
+        "detected_ghg_col": None,
+    }
+
+    if not path.exists():
+        result["issues"].append("파일이 존재하지 않습니다.")
+        return result
+
+    try:
+        df_raw = pd.read_excel(path, sheet_name=0, header=None)
+        df = _apply_two_row_header(df_raw)
+    except Exception as e:
+        result["issues"].append(f"헤더 처리 오류: {e}")
+        return result
+
+    facility_col = _detect_facility_column(df.columns)
+    month_cols = [
+        c for c in df.columns if isinstance(c, str)
+        and c.endswith("월") and c[0].isdigit()
     ]
 
-    df_group["기관명"] = pd.Categorical(df_group["기관명"], categories=ORDER, ordered=True)
-    df_group = df_group.sort_values("기관명")
+    ghg_col = None
+    for c in df.columns:
+        if "온실가스" in str(c) and "환산" in str(c):
+            ghg_col = c
+            break
 
-    st.dataframe(df_group, use_container_width=True)
+    if facility_col is None:
+        result["issues"].append("소속기관명 컬럼 탐지 실패")
+    if not month_cols:
+        result["issues"].append("월별 사용량 컬럼 탐지 실패")
+    if ghg_col is None:
+        result["warnings"].append("온실가스 환산량 컬럼 없음")
 
+    result["detected_facility_col"] = facility_col
+    result["detected_month_cols"] = month_cols
+    result["detected_ghg_col"] = ghg_col
+    result["ok"] = len(result["issues"]) == 0
 
-    # ============================================================
-    # 에너지 기반 피드백
-    # ============================================================
-
-    st.markdown("## 에너지 기반 피드백")
-
-    # 현재 월
-    df_sel = df_all[df_all["연도"] == selected_year]
-    current_month = int(df_sel["월"].max()) if not df_sel.empty else None
-
-    # 목표 달성 감축률
-    baseline_val = baseline_map.get(selected_year)
-    reduction_ratio = total_V / baseline_val * 100 if baseline_val else None
-
-    f1,f2 = st.columns(2)
-    f1.metric("현재 월", f"{current_month}월" if current_month else "-")
-    f2.metric("목표달성 감축률(V/기준)", "-" if reduction_ratio is None else f"{reduction_ratio:,.1f}%")
-
-    st.markdown("### 기관별 피드백")
-
-    df_fb = df_group.copy()
-    df_fb["사용분포순위"] = df_fb["U합계"].rank(ascending=False, method="dense")
-    df_fb["3개년증가순위"] = df_fb["3개년증감률"].rank(ascending=False, method="dense")
-    df_fb["평균대비순위"] = df_fb["평균대비사용비율"].rank(ascending=False, method="dense")
-
-    if baseline_val:
-        need = total_V - baseline_val
-        need = need if need>0 else 0
-        df_fb["권장감축량"] = need * (df_fb["U합계"]/total_U)
-    else:
-        df_fb["권장감축량"] = None
-
-    def need_reason(row):
-        if (
-            row["3개년증감률"] is not None and row["3개년증감률"]>0
-        ) or (
-            row["평균대비사용비율"] is not None and row["평균대비사용비율"]>1
-        ):
-            return "O"
-        return "X"
-
-    df_fb["증가사유제출"] = df_fb.apply(need_reason, axis=1)
-
-    st.dataframe(df_fb, use_container_width=True)
-
-    # ============================================================
-    # 기존 유지 — 공단 전체 분석·코멘트
-    # ============================================================
-
-    st.markdown("## 공단 전체 분석·코멘트")
-
-    annual_total = analyzer.get_annual_ghg(df_all, by_agency=False)
-    actual_emission = annual_total.query("연도==@selected_year")["연간 온실가스 배출량"].sum()
-
-    recent_total_df, _ = analyzer.get_recent_years_ghg(
-        annual_total,
-        base_year=selected_year
-    )
-
-    fb_text = feedback.generate_overall_feedback(
-        year=selected_year,
-        actual_emission=actual_emission,
-        baseline_emission=baseline_val,
-        reduction_rate_pct=None,
-        ratio_to_baseline=None,
-        recent_total_df=recent_total_df,
-        current_month=current_month,
-    )
-
-    st.write(fb_text)
-
-
-# ============================================================
-# ⚙️ 2) 기준배출량 관리 탭
-# ============================================================
-
-with tab_baseline:
-    st.header("기준배출량 관리")
-
-    st.markdown("### 현재 기준배출량 목록")
-    df_b = pd.DataFrame(baseline_records)
-    if not df_b.empty:
-        st.table(df_b)
-    else:
-        st.info("등록된 기준배출량 없음")
-
-    st.markdown("### 기준배출량 신규 등록")
-    col1, col2 = st.columns(2)
-
-    new_year = col1.number_input("연도", min_value=2000, max_value=2100, step=1)
-    new_val = col2.number_input("기준배출량(tCO2eq)", min_value=0.0, step=100.0)
-
-    if st.button("저장"):
-        baseline_mod.update_baseline_record(BASELINE_PATH, new_year, new_val)
-        st.success("기준배출량 저장 완료")
-        st.rerun()
-
-
-# ============================================================
-# 🔧 3) 디버그 / 진단 탭
-# ============================================================
-
-with tab_debug:
-
-    st.header("디버그 / 구조 진단")
-
-    st.markdown("### 파일 구조 진단")
-    uploaded_debug_file = st.file_uploader("엑셀 구조 진단 파일 업로드 (.xlsx)", type=["xlsx"])
-    if uploaded_debug_file:
-        from tempfile import NamedTemporaryFile
-        with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp.write(uploaded_debug_file.read())
-            tmp_path = Path(tmp.name)
-
-        try:
-            res = loader.validate_excel_file(tmp_path)
-            st.json(res)
-        except Exception as e:
-            st.error(f"진단 오류: {e}")
-
-    st.markdown("---")
-
-    # ============================================================
-    # 실행 환경 진단 — loader.py 확인
-    # ============================================================
-
-    with st.expander("🧪 실행 환경 진단: loader.py 확인"):
-        import modules.loader as ld
-        import inspect
-
-        st.subheader("📌 Streamlit이 사용 중인 loader.py 경로")
-        st.code(ld.__file__)
-
-        st.subheader("📌 함수 목록")
-        st.write(dir(ld))
-
-        st.subheader("📌 실제 loader.py 소스 코드")
-        try:
-            st.code(inspect.getsource(ld), language="python")
-        except:
-            st.error("소스 코드를 불러올 수 없습니다.")
+    return result
