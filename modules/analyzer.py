@@ -255,3 +255,221 @@ def build_dashboard_datasets(
         "recent5_total": recent5_total,
         "recent5_years": recent5_years,
     }
+
+
+# 6) 전망분석 테이블 (시트1 구조 참고)
+def build_projection_tables(
+    annual_total: pd.DataFrame,
+    annual_by_agency: pd.DataFrame,
+    baseline_map: Dict[int, float],
+    target_year: int,
+) -> Dict[str, pd.DataFrame]:
+    """
+    [전망분석]용 테이블 생성.
+
+    - 공단 전체: 엑셀 '에너지 사용량 분석.xlsx' 시트1의 2~4행 구조를 참고한 요약 테이블
+    - 소속기구별: 시트1 7~27행 구조를 참고한 기관별 표
+
+    baseline_map 은 baseline.json 의 사용자 입력값만 사용한다.
+    """
+
+    # ----- 공단 전체 (overall) -----
+    row_total = annual_total[annual_total["연도"] == target_year]
+    if row_total.empty:
+        overall_df = pd.DataFrame(
+            [
+                {
+                    "연도": target_year,
+                    "기준배출량(tCO2eq)": pd.NA,
+                    "이행연도 배출량(tCO2eq)": pd.NA,
+                    "배출비율": pd.NA,
+                    "감축률(%)": pd.NA,
+                }
+            ]
+        )
+    else:
+        actual = float(row_total["연간 온실가스 배출량"].sum())
+        baseline = float(baseline_map.get(target_year)) if target_year in baseline_map else pd.NA
+
+        if baseline is pd.NA or pd.isna(baseline) or baseline == 0:
+            ratio = pd.NA
+            reduction = pd.NA
+        else:
+            ratio = actual / baseline
+            reduction = (baseline - actual) / baseline * 100.0
+
+        overall_df = pd.DataFrame(
+            [
+                {
+                    "연도": target_year,
+                    "기준배출량(tCO2eq)": baseline,
+                    "이행연도 배출량(tCO2eq)": actual,
+                    "배출비율": ratio,
+                    "감축률(%)": reduction,
+                }
+            ]
+        )
+
+    # ----- 소속기구별 (by_agency) -----
+    df_year_agency = annual_by_agency[annual_by_agency["연도"] == target_year].copy()
+    if df_year_agency.empty:
+        by_agency_df = pd.DataFrame(
+            columns=[
+                "기관명",
+                "기준배출량(tCO2eq)",
+                "이행연도 배출량(tCO2eq)",
+                "배출비율",
+                "감축률(%)",
+            ]
+        )
+    else:
+        df_year_agency["연간 온실가스 배출량"] = _force_numeric(
+            df_year_agency["연간 온실가스 배출량"], "연간 온실가스 배출량"
+        )
+
+        total_actual = float(df_year_agency["연간 온실가스 배출량"].sum())
+        baseline_total = baseline_map.get(target_year)
+
+        if baseline_total is None or pd.isna(baseline_total) or total_actual == 0:
+            # 기준배출량 정보를 사용할 수 없는 경우: 기준/비율/감축률은 NaN
+            df_year_agency["기준배출량(tCO2eq)"] = pd.NA
+            df_year_agency["배출비율"] = pd.NA
+            df_year_agency["감축률(%)"] = pd.NA
+        else:
+            baseline_total = float(baseline_total)
+            # 기관별 기준배출량 = 총 기준배출량 × 기관별 실제배출 비중
+            share = df_year_agency["연간 온실가스 배출량"] / total_actual
+            baseline_agency = baseline_total * share
+
+            df_year_agency["기준배출량(tCO2eq)"] = baseline_agency
+
+            ratio = df_year_agency["연간 온실가스 배출량"] / baseline_agency.replace(0, pd.NA)
+            reduction = (baseline_agency - df_year_agency["연간 온실가스 배출량"]) / baseline_agency.replace(
+                0, pd.NA
+            ) * 100.0
+
+            df_year_agency["배출비율"] = ratio
+            df_year_agency["감축률(%)"] = reduction
+
+        by_agency_df = df_year_agency[
+            ["기관명", "기준배출량(tCO2eq)", "연간 온실가스 배출량", "배출비율", "감축률(%)"]
+        ].rename(columns={"연간 온실가스 배출량": "이행연도 배출량(tCO2eq)"})
+
+    return {"overall": overall_df, "by_agency": by_agency_df}
+
+
+# 7) 피드백 테이블 (시트2 구조 참고)
+def build_feedback_tables(
+    annual_total: pd.DataFrame,
+    annual_by_agency: pd.DataFrame,
+    target_year: int,
+) -> Dict[str, pd.DataFrame]:
+    """
+    [피드백]용 요약 테이블 생성.
+
+    - 공단 전체: 시트2 2~4행 구조를 참고한 '금년/전년/5개년 추세' 요약
+    - 소속기구별: 시트2 7~27행 구조를 참고한 기관별 금년/전년/5개년 평균 증가율
+    """
+
+    # ----- 공단 전체 피드백 -----
+    df_total = annual_total.copy()
+    df_total["연도"] = pd.to_numeric(df_total["연도"], errors="coerce").astype("Int64")
+    df_total["연간 온실가스 배출량"] = _force_numeric(
+        df_total["연간 온실가스 배출량"], "연간 온실가스 배출량"
+    )
+
+    row_cur = df_total[df_total["연도"] == target_year]
+    row_prev = df_total[df_total["연도"] == target_year - 1]
+
+    cur_val = float(row_cur["연간 온실가스 배출량"].sum()) if not row_cur.empty else pd.NA
+    prev_val = float(row_prev["연간 온실가스 배출량"].sum()) if not row_prev.empty else pd.NA
+
+    if prev_val is pd.NA or pd.isna(prev_val) or prev_val == 0:
+        yoy_diff = pd.NA
+        yoy_rate = pd.NA
+    else:
+        yoy_diff = cur_val - prev_val if not pd.isna(cur_val) else pd.NA
+        yoy_rate = (cur_val - prev_val) / prev_val * 100.0 if not pd.isna(cur_val) else pd.NA
+
+    # 최근 5개년 평균 증감률
+    window_years = df_total[df_total["연도"] <= target_year].sort_values("연도").tail(5)
+    if len(window_years) >= 2:
+        window_years["prev"] = window_years["연간 온실가스 배출량"].shift(1)
+        valid = window_years["prev"] > 0
+        yoy_series = (window_years["연간 온실가스 배출량"] - window_years["prev"]) / window_years[
+            "prev"
+        ] * 100.0
+        recent5_avg = float(yoy_series[valid].mean()) if valid.any() else pd.NA
+    else:
+        recent5_avg = pd.NA
+
+    feedback_overall = pd.DataFrame(
+        [
+            {
+                "연도": target_year,
+                "금년 배출량(tCO2eq)": cur_val,
+                "전년 배출량(tCO2eq)": prev_val,
+                "전년 대비 증감량(tCO2eq)": yoy_diff,
+                "전년 대비 증감률(%)": yoy_rate,
+                "최근5개년 평균 증감률(%)": recent5_avg,
+            }
+        ]
+    )
+
+    # ----- 소속기구별 피드백 -----
+    df_agency = annual_by_agency.copy()
+    df_agency["연도"] = pd.to_numeric(df_agency["연도"], errors="coerce").astype("Int64")
+    df_agency["연간 온실가스 배출량"] = _force_numeric(
+        df_agency["연간 온실가스 배출량"], "연간 온실가스 배출량"
+    )
+
+    cur_agency = df_agency[df_agency["연도"] == target_year][["기관명", "연간 온실가스 배출량"]].rename(
+        columns={"연간 온실가스 배출량": "금년 배출량(tCO2eq)"}
+    )
+    prev_agency = df_agency[df_agency["연도"] == target_year - 1][
+        ["기관명", "연간 온실가스 배출량"]
+    ].rename(columns={"연간 온실가스 배출량": "전년 배출량(tCO2eq)"})
+
+    merged = pd.merge(cur_agency, prev_agency, on="기관명", how="outer")
+
+    # 전년 대비 증감량/증감률
+    merged["전년 대비 증감량(tCO2eq)"] = merged["금년 배출량(tCO2eq)"] - merged["전년 배출량(tCO2eq)"]
+    merged["전년 대비 증감률(%)"] = (
+        (merged["금년 배출량(tCO2eq)"] - merged["전년 배출량(tCO2eq)"])
+        / merged["전년 배출량(tCO2eq)"]
+        * 100.0
+    )
+    merged.loc[merged["전년 배출량(tCO2eq)"] <= 0, "전년 대비 증감률(%)"] = pd.NA
+
+    # 최근 5개년 평균 증가율(기관별)
+    start_year = target_year - 4
+    window = df_agency[(df_agency["연도"] >= start_year) & (df_agency["연도"] <= target_year)]
+
+    def _avg_yoy(group: pd.DataFrame) -> float:
+        g = group.sort_values("연도").copy()
+        g["prev"] = g["연간 온실가스 배출량"].shift(1)
+        valid = g["prev"] > 0
+        yoy = (g["연간 온실가스 배출량"] - g["prev"]) / g["prev"] * 100.0
+        if valid.any():
+            return float(yoy[valid].mean())
+        return float("nan")
+
+    recent5_agency = (
+        window.groupby("기관명").apply(_avg_yoy).rename("최근5개년 평균 증감률(%)").reset_index()
+    )
+
+    feedback_agency = pd.merge(merged, recent5_agency, on="기관명", how="left")
+
+    return {
+        "overall": feedback_overall,
+        "by_agency": feedback_agency[
+            [
+                "기관명",
+                "금년 배출량(tCO2eq)",
+                "전년 배출량(tCO2eq)",
+                "전년 대비 증감량(tCO2eq)",
+                "전년 대비 증감률(%)",
+                "최근5개년 평균 증감률(%)",
+            ]
+        ],
+    }
