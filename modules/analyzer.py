@@ -13,6 +13,21 @@ def _ensure_not_empty(df: pd.DataFrame, name: str):
         raise ValueError(f"{name} 데이터가 비어 있습니다. 먼저 에너지 사용량 파일을 업로드해 주세요.")
 
 
+def _force_numeric(s: pd.Series, col_name: str) -> pd.Series:
+    """
+    집계에 사용하는 컬럼을 무조건 float 로 강제 변환.
+
+    - 콤마/공백 등이 섞여 있어도 pd.to_numeric(errors="coerce")로 숫자만 취함
+    - 변환 실패 값은 NaN
+    """
+    try:
+        s_num = pd.to_numeric(s, errors="coerce")
+        return s_num.astype("float64")
+    except Exception as e:
+        # 이 단계에서 다시 한 번 에러를 감싸서 어느 컬럼인지 알려줌
+        raise RuntimeError(f"[숫자 변환] '{col_name}' 컬럼을 숫자로 변환하는 중 오류: {e}") from e
+
+
 # 1) 월별·기관별 온실가스 환산량 계산
 def get_monthly_ghg(
     df_std: pd.DataFrame,
@@ -29,9 +44,13 @@ def get_monthly_ghg(
 
     try:
         df = df_std.copy()
+
+        # 연도/월/온실가스 모두 숫자 캐스팅
         df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
         df["월"] = pd.to_numeric(df["월"], errors="coerce").astype("Int64")
-        df["온실가스 환산량"] = pd.to_numeric(df["온실가스 환산량"], errors="coerce")
+        df["온실가스 환산량"] = _force_numeric(df["온실가스 환산량"], "온실가스 환산량")
+
+        # 연도/월 정보가 없는 행 제거
         df = df.dropna(subset=["연도", "월"])
     except Exception as e:
         raise RuntimeError(f"[월별 집계 단계] 데이터 타입 정리 중 오류: {e}") from e
@@ -73,7 +92,7 @@ def get_annual_ghg(
     try:
         df = df_std.copy()
         df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-        df["온실가스 환산량"] = pd.to_numeric(df["온실가스 환산량"], errors="coerce")
+        df["온실가스 환산량"] = _force_numeric(df["온실가스 환산량"], "온실가스 환산량")
         df = df.dropna(subset=["연도"])
     except Exception as e:
         raise RuntimeError(f"[연간 집계 단계] 데이터 타입 정리 중 오류: {e}") from e
@@ -112,7 +131,7 @@ def calculate_reduction_metrics(
 
     df = annual_ghg_df.copy()
     df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-    df["연간 온실가스 배출량"] = pd.to_numeric(df["연간 온실가스 배출량"], errors="coerce")
+    df["연간 온실가스 배출량"] = _force_numeric(df["연간 온실가스 배출량"], "연간 온실가스 배출량")
 
     if not isinstance(baseline_map, dict):
         baseline_map = {}
