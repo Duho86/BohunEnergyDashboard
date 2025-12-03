@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -64,7 +63,6 @@ def _apply_two_row_header(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.iloc[1:].copy()
     df.columns = header
 
-    # 공백/NaN 컬럼명 제거 및 공백 제거
     df = df.loc[:, df.columns.notna()]
     df = df.rename(columns=lambda c: str(c).strip())
 
@@ -102,7 +100,6 @@ def _coerce_numeric_series(s: pd.Series, col_name: str) -> Tuple[pd.Series, int]
     """
     original = s.copy()
 
-    # 먼저 문자열로 변환 후, 콤마 제거 및 sentinel 값 처리
     s_clean = (
         s.astype(str)
         .str.strip()
@@ -141,7 +138,7 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
     if facility_col is None:
         raise EnergyDataError("소속기관명 컬럼을 찾지 못했습니다.")
 
-    # 3) 월 컬럼 찾기 (예: '1월' ~ '12월')
+    # 3) 월 컬럼 찾기 ('1월' ~ '12월')
     month_cols: List[str] = [
         c
         for c in df.columns
@@ -160,7 +157,6 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
             ghg_col = c
             break
     if ghg_col is None:
-        # 최소한 '온실가스' 가 포함된 컬럼이라도 시도
         for c in df.columns:
             sc = str(c)
             if "온실가스" in sc:
@@ -174,15 +170,17 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
     # 6) 온실가스 환산량(연간) 전처리
     if ghg_col is not None:
         df[ghg_col], _ = _coerce_numeric_series(df[ghg_col], ghg_col)
-    else:
-        df[ghg_col] = pd.NA  # type: ignore[index]
 
     # 7) 행별 월 사용량 합계 → 비율 계산용
     df["row_energy_sum"] = df[month_cols].sum(axis=1, skipna=True)
 
     # 8) 월별 long 포맷으로 변환
+    id_vars = [facility_col, "row_energy_sum"]
+    if ghg_col is not None:
+        id_vars.append(ghg_col)
+
     melted = df.melt(
-        id_vars=[facility_col, "row_energy_sum", ghg_col] if ghg_col is not None else [facility_col, "row_energy_sum"],
+        id_vars=id_vars,
         value_vars=month_cols,
         var_name="월",
         value_name="에너지사용량",
@@ -193,8 +191,6 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
     melted["월"] = pd.to_numeric(melted["월"], errors="coerce").astype("Int64")
 
     # 10) 월별 온실가스 환산량 배분
-    #     - 전제: df[ghg_col]은 "해당 행 전체(연간 또는 합계) 온실가스 환산량"
-    #     - 로직: 각 월 에너지 사용량 비율로 나누어 월별 온실가스 환산량을 분배
     if ghg_col is not None:
         melted["row_ghg_total"] = melted[ghg_col]
     else:
@@ -224,7 +220,6 @@ def normalize_energy_dataframe(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
         }
     )
 
-    # NaN 월/기관명 행 제거
     result = result.dropna(subset=["월", "기관명"])
 
     return result.reset_index(drop=True)
@@ -245,7 +240,6 @@ def load_energy_xlsx(path: Path) -> Tuple[pd.DataFrame, int]:
     year = _extract_year_from_filename(path.name)
 
     try:
-        # header=None 으로 읽어서 2행 헤더 구조를 그대로 가져간다.
         df_raw = pd.read_excel(path, sheet_name=0, header=None)
     except Exception as e:
         raise EnergyDataError(f"엑셀 파일을 읽는 중 오류가 발생했습니다: {e}")
@@ -268,28 +262,19 @@ def process_uploaded_energy_file(
     """
     Streamlit file_uploader 로 업로드된 파일을 data/energy/ 에 저장하고,
     구조를 검증한 뒤 표준 스키마 DataFrame을 반환.
-
-    - file_obj: st.uploaded_file
-    - original_filename: 사용자가 업로드한 원본 파일명
     """
     ensure_energy_dir(base_dir)
 
     year = _extract_year_from_filename(original_filename)
     save_path = base_dir / original_filename
 
-    # 파일 저장
     try:
         with open(save_path, "wb") as f:
             f.write(file_obj.getbuffer())
     except Exception as e:
         raise EnergyDataError(f"업로드 파일을 저장하는 중 오류가 발생했습니다: {e}")
 
-    # 저장 후 구조 검증 & 표준 스키마 변환 시도
-    try:
-        df_std, _ = load_energy_xlsx(save_path)
-    except Exception:
-        # 실패 시 저장된 파일을 삭제할지 여부는 정책에 따라 결정
-        raise
+    df_std, _ = load_energy_xlsx(save_path)
 
     return df_std, year, save_path
 
@@ -304,7 +289,6 @@ def validate_excel_file(path: Path) -> Dict[str, Any]:
     - 어떤 컬럼을 기관명으로 인식했는지
     - 월 컬럼은 몇 개 인식했는지
     - 온실가스 환산량 컬럼은 무엇인지
-    등을 리턴
     """
     result: Dict[str, Any] = {
         "filename": path.name,
@@ -355,6 +339,6 @@ def validate_excel_file(path: Path) -> Dict[str, Any]:
     result["detected_facility_col"] = facility_col
     result["detected_month_cols"] = month_cols
     result["detected_ghg_col"] = ghg_col
-
     result["ok"] = len(result["issues"]) == 0
+
     return result
