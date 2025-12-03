@@ -66,7 +66,7 @@ def get_monthly_ghg(
                 total = total.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
                 g = pd.concat([g, total], ignore_index=True)
 
-            return g.sort_values(["연도", "기관명", "월"]).reset_index(drop=True)
+            return g.sort_values(["연도", "기관명", "월"]).reset_index(drop과drop=True)
 
         g = df.groupby(["연도", "월"], as_index=False)["온실가스 환산량"].sum()
         g = g.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
