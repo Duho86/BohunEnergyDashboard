@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import pandas as pd
 
 
@@ -17,9 +17,7 @@ def _ensure_not_empty(df: pd.DataFrame, name: str):
 
 
 def _force_numeric(s: pd.Series, col_name: str) -> pd.Series:
-    """
-    집계에 사용하는 컬럼을 무조건 float 로 강제 변환.
-    """
+    """집계에 사용하는 컬럼을 무조건 float 로 강제 변환."""
     try:
         s_num = pd.to_numeric(s, errors="coerce")
         return s_num.astype("float64")
@@ -31,7 +29,10 @@ def _force_numeric(s: pd.Series, col_name: str) -> pd.Series:
 # 1) 월별 · 기관별 온실가스 환산량 집계
 # ============================================================
 
-def get_monthly_ghg(df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = False) -> pd.DataFrame:
+def get_monthly_ghg(
+    df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = False
+) -> pd.DataFrame:
+    """표준 스키마(df_std)를 월별 온실가스 환산량 집계 형태로 변환한다."""
     _ensure_not_empty(df_std, "표준 스키마")
 
     required = {"연도", "기관명", "월", "온실가스 환산량"}
@@ -68,7 +69,10 @@ def get_monthly_ghg(df_std: pd.DataFrame, *, by_agency: bool = True, include_tot
 # 2) 연간 온실가스 배출량 집계
 # ============================================================
 
-def get_annual_ghg(df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = True) -> pd.DataFrame:
+def get_annual_ghg(
+    df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = True
+) -> pd.DataFrame:
+    """표준 스키마(df_std)를 연간 온실가스 배출량 집계 형태로 변환한다."""
     _ensure_not_empty(df_std, "표준 스키마")
 
     required = {"연도", "기관명", "온실가스 환산량"}
@@ -100,10 +104,14 @@ def get_annual_ghg(df_std: pd.DataFrame, *, by_agency: bool = True, include_tota
 
 
 # ============================================================
-# 3) 기준배출량 대비 배출비율/감축률 계산
+# 3) 기준배출량 관련 유틸 (현재 앱에서는 사용 안 함)
+#    - 과거 호환성을 위해 함수만 남겨 둠
 # ============================================================
 
-def calculate_reduction_metrics(annual_ghg_df: pd.DataFrame, baseline_map: Dict[int, float]) -> pd.DataFrame:
+def calculate_reduction_metrics(
+    annual_ghg_df: pd.DataFrame, baseline_map: Dict[int, float]
+) -> pd.DataFrame:
+    """기준배출량 대비 배출비율/감축률 계산 (현재 앱에서는 미사용)."""
     _ensure_not_empty(annual_ghg_df, "연간 배출량")
 
     df = annual_ghg_df.copy()
@@ -136,7 +144,9 @@ def calculate_reduction_metrics(annual_ghg_df: pd.DataFrame, baseline_map: Dict[
 # 4) 최근 5개년 연간 배출량 조회
 # ============================================================
 
-def get_recent_years_ghg(annual_ghg_df: pd.DataFrame, *, n_years: int = 5, base_year: Optional[int] = None):
+def get_recent_years_ghg(
+    annual_ghg_df: pd.DataFrame, *, n_years: int = 5, base_year: Optional[int] = None
+):
     _ensure_not_empty(annual_ghg_df, "연간 배출량")
 
     df = annual_ghg_df.copy()
@@ -169,7 +179,10 @@ def get_recent_years_ghg(annual_ghg_df: pd.DataFrame, *, n_years: int = 5, base_
 # 5) 대시보드용 집계 데이터 패키지
 # ============================================================
 
-def build_dashboard_datasets(df_std: pd.DataFrame, baseline_map: Dict[int, float]) -> dict:
+def build_dashboard_datasets(df_std: pd.DataFrame) -> dict:
+    """대시보드 상단 그래프/지표용 집계 데이터 패키지 생성.
+    (기준배출량과 무관하게 온실가스 환산량 기준 집계만 수행)
+    """
     _ensure_not_empty(df_std, "표준 스키마")
 
     monthly_by_agency = get_monthly_ghg(df_std, by_agency=True)
@@ -178,24 +191,16 @@ def build_dashboard_datasets(df_std: pd.DataFrame, baseline_map: Dict[int, float
     annual_by_agency = get_annual_ghg(df_std, by_agency=True)
     annual_total = get_annual_ghg(df_std, by_agency=False)
 
-    annual_with_baseline = calculate_reduction_metrics(annual_total, baseline_map)
-
-    recent_total, recent_years = get_recent_years_ghg(annual_total)
-
     return {
         "monthly_by_agency": monthly_by_agency,
         "monthly_total": monthly_total,
         "annual_by_agency": annual_by_agency,
         "annual_total": annual_total,
-        "annual_total_with_baseline": annual_with_baseline,
-        "recent5_total": recent_total,
-        "recent5_years": recent_years,
     }
 
 
 # ============================================================
-# 기존 전망분석/피드백 함수는 호출되지 않지만,
-# 코드 안정성/호환성을 위해 남겨둡니다.
+# (옛) 전망분석/피드백 테이블 더미 구현
 # ============================================================
 
 def build_projection_tables(*args, **kwargs):
