@@ -392,4 +392,353 @@ with tab_dashboard:
                 )
                 st.line_chart(chart_month)
             else:
-                st.info("선택 조
+                st.info("선택 조건에 해당하는 월별 데이터가 없습니다.")
+
+        with c2:
+            st.markdown("#### 최근 5개년 연간 배출량 추이")
+            if not recent_df.empty:
+                chart_recent = (
+                    recent_df.sort_values("연도")[["연도", "연간 온실가스 배출량"]]
+                    .set_index("연도")
+                )
+                st.bar_chart(chart_recent)
+            else:
+                st.info("선택 조건에 해당하는 연간 데이터가 없습니다.")
+
+    # ========================================================
+    # 2-2) 에너지 사용량 분석 (df_raw 기반, 시트1 명세)
+    # ========================================================
+
+    st.markdown("---")
+    st.markdown("## 에너지 사용량 분석")
+
+    raw_df_original = load_raw_year_data(int(selected_year))
+    if raw_df_original is None:
+        st.error(f"{selected_year}년 원본 에너지 사용량 파일을 찾을 수 없습니다.")
+        st.stop()
+
+    # U/V/W 전처리
+    raw_df, org_col, U_col, V_col, W_col, preprocess_errors = preprocess_uv_w(
+        raw_df_original
+    )
+
+    # ---------- 2-1. 공단 전체 기준 ----------
+    total_U = float(raw_df[U_col].sum(skipna=True))
+    total_V = float(raw_df[V_col].sum(skipna=True))
+
+    # 최근 3개년 U합계 평균
+    past_years = [int(selected_year) - 3, int(selected_year) - 2, int(selected_year) - 1]
+    past_u_values: List[float] = []
+    for y in past_years:
+        df_past_raw = load_raw_year_data(y)
+        if df_past_raw is not None:
+            df_past, p_org, p_U, p_V, p_W, _ = preprocess_uv_w(df_past_raw)
+            past_u_values.append(float(df_past[p_U].sum(skipna=True)))
+
+    if past_u_values:
+        past_avg_U = sum(past_u_values) / len(past_u_values)
+        if past_avg_U != 0:
+            U_change_rate = (total_U - past_avg_U) / past_avg_U * 100
+        else:
+            U_change_rate = None
+    else:
+        past_avg_U = None
+        U_change_rate = None
+
+    st.markdown("### 공단 전체 기준")
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("에너지 사용량(현재 기준)", f"{total_U:,.0f}")
+    k2.metric("면적당 온실가스 배출량", f"{total_V:,.0f}")
+    k3.metric(
+        "3개년 평균 대비 증감률",
+        "-" if U_change_rate is None else f"{U_change_rate:,.1f} %",
+    )
+
+    # W 평균 (의료/복지/기타)
+    st.markdown("#### 평균 에너지 사용량(W 평균)")
+
+    def avg_group(names: List[str]) -> Optional[float]:
+        df_tmp = raw_df[raw_df[org_col].isin(names)]
+        if df_tmp.empty:
+            return None
+        return float(df_tmp[W_col].mean(skipna=True))
+
+    med_avg = avg_group(MEDICAL_FACILITIES)
+    wel_avg = avg_group(WELFARE_FACILITIES)
+    oth_avg = avg_group(OTHER_FACILITIES)
+
+    g1, g2, g3 = st.columns(3)
+    g1.metric("의료시설 평균(W)", "-" if med_avg is None else f"{med_avg:,.1f}")
+    g2.metric("복지시설 평균(W)", "-" if wel_avg is None else f"{wel_avg:,.1f}")
+    g3.metric("기타시설 평균(W)", "-" if oth_avg is None else f"{oth_avg:,.1f}")
+
+    # ---------- 2-2. 소속기구별 분석 ----------
+    st.markdown("### 소속기구별 분석")
+
+    # 기관별 집계: U합, V합, W평균
+    df_group = (
+        raw_df.groupby(org_col)
+        .agg(
+            U_sum=(U_col, "sum"),
+            V_sum=(V_col, "sum"),
+            W_mean=(W_col, "mean"),
+        )
+        .reset_index()
+        .rename(columns={org_col: "구분"})
+    )
+
+    def facility_type(name: str) -> str:
+        if name in MEDICAL_FACILITIES:
+            return "의료시설"
+        if name in WELFARE_FACILITIES:
+            return "복지시설"
+        if name in OTHER_FACILITIES:
+            return "기타시설"
+        return "기타시설"
+
+    df_group["시설구분"] = df_group["구분"].apply(facility_type)
+
+    # 전체 대비 사용량 분포비율 = 기관 U / 전체 U
+    if total_U != 0:
+        df_group["전체 대비 사용량 분포비율"] = df_group["U_sum"] / total_U * 100
+    else:
+        df_group["전체 대비 사용량 분포비율"] = pd.NA
+
+    # 평균 에너지 사용량 대비 사용비율 = 기관 W평균 / 시설군 W평균
+    def w_ratio(row):
+        if row["시설구분"] == "의료시설":
+            base = med_avg
+        elif row["시설구분"] == "복지시설":
+            base = wel_avg
+        else:
+            base = oth_avg
+        if base in (None, 0) or pd.isna(row["W_mean"]):
+            return pd.NA
+        return row["W_mean"] / base
+
+    df_group["평균 에너지 사용량(W) 대비 사용비율"] = df_group.apply(w_ratio, axis=1)
+
+    # 기관별 3개년 평균 대비 증감률 = (올해U - 과거3개년U평균) / 과거3개년U평균
+    def three_year_rate(name: str) -> Optional[float]:
+        vals: List[float] = []
+        for y in past_years:
+            dfp_raw = load_raw_year_data(y)
+            if dfp_raw is not None:
+                dfp, p_org, p_U, p_V, p_W, _ = preprocess_uv_w(dfp_raw)
+                dfp = dfp[dfp[p_org].notna()].copy()
+                dfp[p_org] = dfp[p_org].astype(str).str.strip()
+                vals.append(float(dfp[dfp[p_org] == name][p_U].sum(skipna=True)))
+        if not vals:
+            return None
+        avg_past = sum(vals) / len(vals)
+        if avg_past == 0:
+            return None
+        now_u = float(df_group.loc[df_group["구분"] == name, "U_sum"].iloc[0])
+        return (now_u - avg_past) / avg_past * 100
+
+    df_group["3개년 평균 대비 증감률"] = df_group["구분"].apply(three_year_rate)
+
+    # 표시용 컬럼명 정리
+    df_group_display = df_group.rename(columns={
+        "U_sum": "에너지 사용량(현재 기준)",
+        "V_sum": "면적당 온실가스 배출량",
+        "W_mean": "W평균",
+    })
+
+    # 기관 순서 고정
+    df_group_display["구분"] = pd.Categorical(
+        df_group_display["구분"], categories=FACILITY_ORDER, ordered=True
+    )
+    df_group_display = df_group_display.sort_values("구분")
+
+    cols_analysis = [
+        "구분",
+        "시설구분",
+        "에너지 사용량(현재 기준)",
+        "면적당 온실가스 배출량",
+        "전체 대비 사용량 분포비율",
+        "평균 에너지 사용량(W) 대비 사용비율",
+        "3개년 평균 대비 증감률",
+    ]
+
+    st.dataframe(
+        df_group_display[cols_analysis].style.format(na_rep="-"),
+        use_container_width=True,
+    )
+
+    # ========================================================
+    # 2-3) 피드백 (df_raw 기반, 시트2 명세)
+    # ========================================================
+
+    st.markdown("## 피드백")
+
+    # ---------- 3-1. 공단 전체 기준 ----------
+    st.markdown("### 공단 전체 기준")
+
+    기준달 = detect_last_month_with_data(raw_df_original)
+    f1 = st.columns(1)[0]
+    f1.metric("기준 달", f"{기준달}월" if 기준달 is not None else "-")
+
+    # ---------- 3-2. 소속기구별 피드백 ----------
+    st.markdown("### 소속기구별 피드백")
+
+    df_fb = df_group_display.copy()
+
+    # 사용량 분포 순위 (U합계 기준)
+    df_fb["사용량 분포 순위"] = df_fb["에너지 사용량(현재 기준)"].rank(
+        ascending=False, method="dense"
+    )
+
+    # 에너지 3개년 평균 증가 순위 (3개년 평균 대비 증감률 기준)
+    df_fb["에너지 3개년 평균 증가 순위"] = df_fb["3개년 평균 대비 증감률"].rank(
+        ascending=False, method="dense"
+    )
+
+    # 평균 에너지 사용량(W) 기준 순위
+    df_fb["평균 에너지 사용량(W) 기준 순위"] = df_fb[
+        "평균 에너지 사용량(W) 대비 사용비율"
+    ].rank(ascending=False, method="dense")
+
+    # 권장 감축량: U증가분 + W초과분 기준
+    def recommended_reduction(row) -> Optional[float]:
+        name = row["구분"]
+
+        # 기관별 3개년 평균 U
+        vals: List[float] = []
+        for y in past_years:
+            dfp_raw = load_raw_year_data(y)
+            if dfp_raw is not None:
+                dfp, p_org, p_U, p_V, p_W, _ = preprocess_uv_w(dfp_raw)
+                dfp = dfp[dfp[p_org].notna()].copy()
+                dfp[p_org] = dfp[p_org].astype(str).str.strip()
+                vals.append(float(dfp[dfp[p_org] == name][p_U].sum(skipna=True)))
+
+        avg_u = sum(vals) / len(vals) if vals else None
+        current_u = row["에너지 사용량(현재 기준)"]
+
+        # U 증가율
+        if avg_u is not None and avg_u > 0:
+            delta_u = max(current_u - avg_u, 0)
+            u_ratio = delta_u / avg_u
+        else:
+            u_ratio = 0.0
+
+        # 시설군 평균 대비 W 초과율
+        group = row["시설구분"]
+        if group == "의료시설":
+            base_w = med_avg
+        elif group == "복지시설":
+            base_w = wel_avg
+        else:
+            base_w = oth_avg
+
+        w_mean = row["W평균"]
+        if base_w not in (None, 0) and pd.notna(w_mean):
+            excess_w_ratio = max(w_mean / base_w - 1, 0)
+        else:
+            excess_w_ratio = 0.0
+
+        scale = u_ratio + excess_w_ratio
+        if scale <= 0:
+            return 0.0
+        return float(current_u * scale)
+
+    df_fb["권장 감축량"] = df_fb.apply(recommended_reduction, axis=1)
+
+    # 에너지 사용량 증가 사유 제출 대상
+    def need_reason(row) -> str:
+        cond1 = pd.notna(row["3개년 평균 대비 증감률"]) and row["3개년 평균 대비 증감률"] > 0
+        cond2 = (
+            pd.notna(row["평균 에너지 사용량(W) 대비 사용비율"])
+            and row["평균 에너지 사용량(W) 대비 사용비율"] > 1
+        )
+        return "O" if (cond1 or cond2) else "X"
+
+    df_fb["에너지 사용량 증가 사유 제출 대상"] = df_fb.apply(need_reason, axis=1)
+
+    fb_cols = [
+        "구분",
+        "사용량 분포 순위",
+        "에너지 3개년 평균 증가 순위",
+        "평균 에너지 사용량(W) 기준 순위",
+        "권장 감축량",
+        "에너지 사용량 증가 사유 제출 대상",
+    ]
+
+    st.dataframe(
+        df_fb[fb_cols].style.format(na_rep="-"),
+        use_container_width=True,
+    )
+
+    # ---------- 3-3. 최종 피드백 문장 (단순 유지용 텍스트) ----------
+    st.markdown("### 공단 전체 분석·코멘트")
+    # 기존 화면의 하단 문장을 유지하는 취지로, 간단한 요약 문장을 생성
+    recent_total_df, recent_years = analyzer.get_recent_years_ghg(
+        annual_total, base_year=int(selected_year)
+    )
+    if not recent_total_df.empty and len(recent_years) >= 2:
+        df_recent_sorted = recent_total_df.sort_values("연도")
+        first_val = float(df_recent_sorted.iloc[0]["연간 온실가스 배출량"])
+        last_val = float(df_recent_sorted.iloc[-1]["연간 온실가스 배출량"])
+        if last_val > first_val:
+            trend = "증가 추세"
+        elif last_val < first_val:
+            trend = "감소 추세"
+        else:
+            trend = "유지 추세"
+        st.write(
+            f"※ 공단 에너지 사용량 증감 분석 결과, 최근 {len(recent_years)}개년 동안 온실가스 배출량은 "
+            f"전반적으로 **{trend}**를 보이고 있습니다. 기관별 피드백을 참고하여 추가적인 절감 방안을 검토해 주시기 바랍니다."
+        )
+    else:
+        st.write(
+            "※ 공단 에너지 사용량 증감 분석을 위한 충분한 연도 데이터가 확보되지 않았습니다. "
+            "추가 연도 데이터 업로드 후 다시 확인해 주세요."
+        )
+
+
+# ============================================================
+# 🔧 3) 디버그 / 진단 탭 (구조 진단 롤백)
+# ============================================================
+
+with tab_debug:
+
+    st.header("디버그 / 구조 진단")
+
+    st.markdown("### 엑셀 구조 진단")
+
+    uploaded_debug_file = st.file_uploader(
+        "엑셀 구조 진단 파일 업로드 (.xlsx)", type=["xlsx"]
+    )
+
+    if uploaded_debug_file:
+        from tempfile import NamedTemporaryFile
+
+        with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(uploaded_debug_file.read())
+            tmp_path = Path(tmp.name)
+
+        # 1) 원본 헤더(상위 몇 행) 미리보기
+        try:
+            df_raw_full = pd.read_excel(tmp_path, sheet_name=0, header=None)
+            st.subheader("원본 엑셀 헤더(상위 5행)")
+            st.dataframe(df_raw_full.head(), use_container_width=True)
+        except Exception as e:
+            st.error(f"원본 엑셀 읽기 오류: {e}")
+        else:
+            # 2) 구조 진단 (소속기관 컬럼 / 월별 컬럼 / 온실가스 컬럼 탐지)
+            try:
+                res = loader.validate_excel_file(tmp_path)
+                st.subheader("구조 진단 결과")
+                st.json(res)
+            except Exception as e:
+                st.error(f"구조 진단 오류: {e}")
+
+            # 3) 표준 스키마 변환 결과 미리보기
+            try:
+                df_std, year = loader.load_energy_xlsx(tmp_path)
+                st.subheader(f"표준 스키마 변환 결과 미리보기 (연도: {year})")
+                st.dataframe(df_std.head(), use_container_width=True)
+            except Exception as e:
+                st.error(f"표준 스키마 변환 오류: {e}")
