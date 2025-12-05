@@ -209,9 +209,10 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
 
+    # 헤더/컬럼 정규화
     df = _normalize_columns(df_original)
 
-    # 핵심 컬럼 이름 탐색 (후보 중 존재하는 것)
+    # 핵심 컬럼 이름 탐색 (후보 중 존재하는 것 사용)
     org_col = _find_first_existing_column(df, ORG_COL_CANDIDATES)
     area_col = _find_first_existing_column(df, AREA_COL_CANDIDATES)
     annual_col = _find_first_existing_column(df, ANNUAL_USAGE_COL_CANDIDATES)
@@ -222,11 +223,18 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             f"현재 컬럼: {list(df.columns)}"
         )
 
+    # 기관명 / 시설구분
     org_series = df[org_col].astype(str).str.strip()
     facility_type = df[FACILITY_TYPE_COL].astype(str).str.strip()
-    area = pd.to_numeric(df[area_col], errors="coerce")
+
+    # 연면적: 숫자화 후, 같은 기관 내 NaN 은 해당 기관의 최대값(보통 전기 줄)을 사용
+    area_raw = pd.to_numeric(df[area_col], errors="coerce")
+    area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max()))
+
+    # 연간 사용량(연단위)
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
+    # df_raw 구성
     df_raw = pd.DataFrame(
         {
             "연도": int(year),
@@ -240,6 +248,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     )
 
     return df_raw
+
 
 
 def load_energy_files(
