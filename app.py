@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import os
 
-from loader import load_all_years
-from analyzer import (
+from modules.loader import load_all_years
+from modules.analyzer import (
     build_sheet1_tables,
     compute_overall_sheet2,
     compute_facility_sheet2,
     compute_overall_feedback,
-    compute_facility_feedback
+    compute_facility_feedback,
 )
 
 # ==============================================
