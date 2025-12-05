@@ -1,79 +1,77 @@
 import pandas as pd
-import numpy as np
 import streamlit as st
 
 
-# ================================================================
-# 공통 유틸
-# ================================================================
-def three_year_avg(series):
-    """
-    3개년 평균: 이전 1~3개년 평균 사용.
-    1개년만 있으면 1개년 평균.
-    2개년이면 2개년 평균.
-    """
-    valid = series.dropna()
-    if len(valid) == 0:
-        return None
-    return valid.mean()
+# ============================================================
+# 시트1: 백데이터 분석용 집계
+# ============================================================
 
-
-# ================================================================
-# 시트 1 — 백데이터 분석
-# ================================================================
-def build_sheet1_tables(year_to_raw: dict):
+def build_sheet1_tables(year_to_raw: dict[int, pd.DataFrame]):
     """
-    시트1: 연도×기관 에너지사용량(U), 연면적, 3개년 평균 대비 분석
-    PDF 원본과 동일한 표 구조 반환
-    """
+    시트1 백데이터 분석용 3개 표 생성:
+      ① 연도 × 기관 에너지 사용량(U)
+      ② 연도 × 기관 연면적
+      ③ 연도별 3개년 평균 에너지 사용량(기관별)
 
-    if len(year_to_raw) == 0:
+    - df_raw의 표준 컬럼: 기관명, U, 연면적 을 사용한다.
+    - 기관 순서는 최초 등장 순서를 기준으로 union.
+      (정상 데이터라면 연도별 기관 목록이 동일하므로 예시 엑셀과 동일한 순서가 됨)
+    """
+    if not year_to_raw:
         return None, None, None
 
-    # 기관명 전체 목록(연도별 기관 일치 가정)
-    sample_year = list(year_to_raw.keys())[0]
-    org_list = year_to_raw[sample_year]["기관명"].tolist()
+    years = sorted(year_to_raw.keys())
+
+    # 기관 순서 결정 (union + 최초 등장 순서 유지)
+    org_order: list[str] = []
+    for y in years:
+        df = year_to_raw[y]
+        for name in df["기관명"].tolist():
+            if name not in org_order:
+                org_order.append(name)
 
     # -------------------------------
-    # ① 연도 x 기관 에너지 사용량(U)
+    # ① 연도 × 기관 에너지 사용량(U)
     # -------------------------------
-    df_u = pd.DataFrame(index=org_list)
+    df_u = pd.DataFrame(index=org_order)
 
-    for y, df in year_to_raw.items():
-        df_u[y] = df["에너지사용량"].values
+    for y in years:
+        df = year_to_raw[y].set_index("기관명")
+        s = df["U"]
+        s = s.reindex(org_order)
+        df_u[y] = s
 
     df_u["합계"] = df_u.sum(axis=1)
     df_u.loc["합계"] = df_u.sum(axis=0)
 
     # -------------------------------
-    # ② 연도 x 기관 연면적
+    # ② 연도 × 기관 연면적
     # -------------------------------
-    df_area = pd.DataFrame(index=org_list)
+    df_area = pd.DataFrame(index=org_order)
 
-    for y, df in year_to_raw.items():
-        df_area[y] = df["연면적"].values
+    for y in years:
+        df = year_to_raw[y].set_index("기관명")
+        s = df["연면적"]
+        s = s.reindex(org_order)
+        df_area[y] = s
 
     df_area["합계"] = df_area.sum(axis=1)
     df_area.loc["합계"] = df_area.sum(axis=0)
 
     # -------------------------------
-    # ③ 3개년 평균 대비 분석
+    # ③ 3개년 평균 에너지 사용량 (기관별)
+    #    - 각 연도별로 직전 최대 3개년 U의 평균
     # -------------------------------
-    df_three = pd.DataFrame(index=org_list)
+    df_three = pd.DataFrame(index=org_order)
 
-    for y in sorted(year_to_raw.keys()):
-        prev_years = [yy for yy in year_to_raw.keys() if yy < y]
-        prev_years = prev_years[-3:]  # 최근 3개년
-
-        colname = y
-        df_three[colname] = np.nan
-
-        if len(prev_years) == 0:
-            # 최초 반영 연도: 실적 그대로
-            df_three[colname] = year_to_raw[y]["에너지사용량"].values
+    for idx, y in enumerate(years):
+        prev_years = years[max(0, idx - 3):idx]
+        if not prev_years:
+            # 최초 연도는 해당 연도 U 그대로 (예시 엑셀 기준)
+            df_three[y] = df_u[y]
         else:
-            prev_values = df_u[prev_years].mean(axis=1)
-            df_three[colname] = prev_values.values
+            prev_mean = df_u[prev_years].mean(axis=1)
+            df_three[y] = prev_mean
 
     df_three["합계"] = df_three.sum(axis=1)
     df_three.loc["합계"] = df_three.sum(axis=0)
@@ -81,224 +79,343 @@ def build_sheet1_tables(year_to_raw: dict):
     return df_u, df_area, df_three
 
 
-# ================================================================
-# 시트 2 — 에너지 사용량 분석
-# ================================================================
-def compute_overall_sheet2(target_year: int, year_to_raw: dict):
+# ============================================================
+# 시트2: 에너지 사용량 분석
+# ============================================================
+
+def compute_overall_sheet2(target_year: int, year_to_raw: dict[int, pd.DataFrame]):
     """
-    시트2 상단 공단 전체 분석
-    PDF 값과 동일 계산
+    시트2 상단: 공단 전체 기준 표용 집계.
+
+    - 에너지 사용량(U 합계)
+    - 전체 면적당 온실가스 배출량(V)
+      (시설별 V * 연면적 합 / 전체 연면적)
+    - 3개년 평균 에너지 사용량 대비 증감률
+    - 시설구분별 평균 에너지 사용량(W 평균)
     """
     if target_year not in year_to_raw:
+        st.error(f"{target_year}년 데이터가 존재하지 않습니다.")
         return None
+
+    years = sorted(year_to_raw.keys())
+    target_idx = years.index(target_year)
 
     df = year_to_raw[target_year]
 
-    total_u = df["에너지사용량"].sum()
+    total_u = df["U"].sum()
+    total_area = df["연면적"].sum()
 
-    # 전년 대비 증감률
-    prev_year = target_year - 1
-    if prev_year in year_to_raw:
-        prev_u = year_to_raw[prev_year]["에너지사용량"].sum()
-        rate_prev = (total_u - prev_u) / prev_u if prev_u != 0 else np.nan
+    # 전체 면적당 온실가스 배출량(V): 면적 가중 평균
+    total_v = (df["V"] * df["연면적"]).sum() / total_area if total_area != 0 else 0.0
+
+    # 직전연도 대비 증감률
+    if target_idx == 0:
+        rate_prev = None
     else:
-        rate_prev = np.nan
+        prev_year = years[target_idx - 1]
+        prev_total_u = year_to_raw[prev_year]["U"].sum()
+        rate_prev = (total_u - prev_total_u) / prev_total_u if prev_total_u != 0 else None
 
     # 3개년 평균 대비 증감률
-    prev_years = [y for y in year_to_raw.keys() if y < target_year]
-    prev_years = prev_years[-3:]
-
-    if len(prev_years) > 0:
-        avg_prev = np.mean([year_to_raw[y]["에너지사용량"].sum() for y in prev_years])
-        rate_three = (total_u - avg_prev) / avg_prev if avg_prev != 0 else np.nan
+    prev_years = years[max(0, target_idx - 3):target_idx]
+    if not prev_years:
+        rate_three = None
     else:
-        rate_three = np.nan
+        prev_mean_u = sum(year_to_raw[y]["U"].sum() for y in prev_years) / len(prev_years)
+        rate_three = (total_u - prev_mean_u) / prev_mean_u if prev_mean_u != 0 else None
 
-    # 시설구분 평균(W)
+    # 시설구분별 평균 W
+    if "시설구분" not in df.columns:
+        st.error("df_raw에 '시설구분' 컬럼이 없어 시트2 상단 시설구분별 평균을 계산할 수 없습니다.")
+        return None
+
     facility_groups = df.groupby("시설구분")
-    w_avg = facility_groups["면적대비사용비율"].mean().to_dict()
+    w_avg_by_group = facility_groups["W"].mean().to_dict()
 
     return {
         "에너지사용량": total_u,
+        "전체면적당온실가스": total_v,
         "전년대비증감": rate_prev,
         "3개년평균대비증감": rate_three,
-        "시설구분평균": w_avg  # {"의료시설": 0.61, ...}
+        "시설구분평균W": w_avg_by_group,
     }
 
 
-def compute_facility_sheet2(target_year: int, year_to_raw: dict):
+def compute_facility_sheet2(target_year: int, year_to_raw: dict[int, pd.DataFrame]):
     """
-    시트2 하단 기관별 분석 표
-    PDF와 동일한 열 구성
+    시트2 하단: 소속기구별 분석 표.
+
+    열 구성(예시 엑셀 시트2 7~행 기준):
+      - 구분(기관명)
+      - 시설구분
+      - 에너지 사용량(U)
+      - 면적당 온실가스 배출량(V)
+      - 공단 에너지 사용량 분포 비율
+      - 평균 에너지 사용량(연면적 기준) 대비 사용비율
+      - 3개년 평균 에너지 사용량 대비 증감률
     """
     if target_year not in year_to_raw:
+        st.error(f"{target_year}년 데이터가 존재하지 않습니다.")
         return None
 
+    years = sorted(year_to_raw.keys())
+    target_idx = years.index(target_year)
     df = year_to_raw[target_year].copy()
 
-    total_u = df["에너지사용량"].sum()
-
-    # 전년들 3개년 평균
-    prev_years = [y for y in year_to_raw.keys() if y < target_year]
-    prev_years = prev_years[-3:]
-
-    if len(prev_years) > 0:
-        prev_u = pd.concat([year_to_raw[y]["에너지사용량"] for y in prev_years], axis=1).mean(axis=1)
-    else:
-        prev_u = pd.Series([np.nan]*len(df))
-
-    df["면적대비에너지비율"] = df["에너지사용량"] / df["연면적"]
-    df["에너지비중"] = df["에너지사용량"] / total_u
-    df["3개년평균대비증감률"] = (df["에너지사용량"] - prev_u.values) / prev_u.values
-
-    # 시설군 평균 V 대비(= W)
-    group_v = df.groupby("시설구분")["면적대비에너지비율"].mean().to_dict()
-    df["시설군평균대비비율"] = df.apply(
-        lambda row: row["면적대비에너지비율"] / group_v[row["시설구분"]]
-        if row["시설구분"] in group_v else np.nan,
-        axis=1
-    )
-
-    return df
-
-
-# ================================================================
-# 시트 3 — 피드백 (권장 사용량, 순위, O/X)
-# ================================================================
-def compute_overall_feedback(target_year: int, year_to_raw: dict):
-    """
-    시트3 상단 공단 전체 피드백
-    PDF 기준: NDC = 4.17%
-    """
-    if target_year not in year_to_raw:
+    if "시설구분" not in df.columns:
+        st.error("df_raw에 '시설구분' 컬럼이 없어 시트2 하단 분석을 계산할 수 없습니다.")
         return None
 
-    df = year_to_raw[target_year]
-    total_u = df["에너지사용량"].sum()
+    # 기본 값
+    total_u = df["U"].sum()
 
-    # NDC 4.17% 기준
-    # 권장 사용량 = 전년 사용량 × (1 - 0.0417)
-    prev_year = target_year - 1
-    if prev_year in year_to_raw:
-        prev_u = year_to_raw[prev_year]["에너지사용량"].sum()
-        recommended = prev_u * (1 - 0.0417)
+    # 공단 에너지 사용량 분포 비율
+    df["공단에너지분포비율"] = df["U"] / total_u if total_u != 0 else 0
+
+    # 시설군 평균 W 대비 비율
+    w_group_mean = df.groupby("시설구분")["W"].mean().to_dict()
+    df["시설군평균W"] = df["시설구분"].map(w_group_mean)
+    df["평균에너지사용비율"] = df["W"] / df["시설군평균W"]
+
+    # 3개년 평균 대비 증감률
+    prev_years = years[max(0, target_idx - 3):target_idx]
+    if prev_years:
+        # 기관별 U 이력 집계
+        history = {}
+        for y in prev_years:
+            df_y = year_to_raw[y][["기관명", "U"]].copy()
+            df_y = df_y.set_index("기관명")
+            history[y] = df_y["U"]
+        hist_df = pd.DataFrame(history)
+        three_mean = hist_df.mean(axis=1)
+
+        df = df.set_index("기관명")
+        df["3개년평균U"] = three_mean
+        df["3개년평균U"] = df["3개년평균U"].fillna(0)
+        df["3개년평균대비증감률"] = df.apply(
+            lambda row: (row["U"] - row["3개년평균U"]) / row["3개년평균U"]
+            if row["3개년평균U"] != 0
+            else None,
+            axis=1,
+        )
+        df = df.reset_index()
     else:
-        recommended = total_u  # 전년도 없음 → 실적 기준치
+        df["3개년평균U"] = None
+        df["3개년평균대비증감률"] = None
 
-    # 전년대비 감축률
-    rate_prev = (recommended - total_u) / total_u
+    # 출력용 열 구성
+    out = df[
+        [
+            "기관명",
+            "시설구분",
+            "U",
+            "V",
+            "공단에너지분포비율",
+            "평균에너지사용비율",
+            "3개년평균대비증감률",
+        ]
+    ].copy()
+
+    out = out.rename(
+        columns={
+            "기관명": "구분",
+            "U": "에너지사용량(U)",
+            "V": "면적당온실가스배출량(V)",
+            "공단에너지분포비율": "공단에너지사용분포비율",
+            "평균에너지사용비율": "평균에너지사용량대비사용비율",
+        }
+    )
+
+    return out
+
+
+# ============================================================
+# 시트3: 피드백 (공단 전체 + 소속기구별)
+# ============================================================
+
+# NDC / 권장 사용량 설정값
+# 👉 실제 예시 엑셀 시트3에서 사용하는 값과 반드시 대조해서 맞춰야 함
+NDC_RATE = 0.0417  # 4.17%
+
+
+def compute_overall_feedback(target_year: int, year_to_raw: dict[int, pd.DataFrame]):
+    """
+    시트3 상단: 공단 전체 피드백용 값 계산.
+      - 권장 에너지 사용량
+      - 전년대비 감축률 (NDC 기반)
+      - 3개년 평균 대비 감축률
+    """
+    if target_year not in year_to_raw:
+        st.error(f"{target_year}년 데이터가 존재하지 않습니다.")
+        return None
+
+    years = sorted(year_to_raw.keys())
+    target_idx = years.index(target_year)
+
+    df = year_to_raw[target_year]
+    total_u = df["U"].sum()
+
+    # 직전연도 기준 권장사용량 = 직전연도 U * (1 - NDC_RATE)
+    if target_idx == 0:
+        # 직전연도 없으면 권장사용량 = 현재 사용량
+        recommended = total_u
+        rate_prev = None
+    else:
+        prev_year = years[target_idx - 1]
+        prev_total_u = year_to_raw[prev_year]["U"].sum()
+        recommended = prev_total_u * (1 - NDC_RATE)
+        rate_prev = -NDC_RATE  # NDC 기준 감축률
 
     # 3개년 평균 대비 감축률
-    prev_years = [y for y in year_to_raw.keys() if y < target_year]
-    prev_years = prev_years[-3:]
-
-    if len(prev_years) > 0:
-        avg_prev = np.mean([year_to_raw[y]["에너지사용량"].sum() for y in prev_years])
-        rate_three = (recommended - avg_prev) / avg_prev
+    prev_years = years[max(0, target_idx - 3):target_idx]
+    if not prev_years:
+        rate_three = None
     else:
-        rate_three = np.nan
+        three_mean = sum(year_to_raw[y]["U"].sum() for y in prev_years) / len(prev_years)
+        rate_three = (recommended - three_mean) / three_mean if three_mean != 0 else None
 
     return {
         "권장사용량": recommended,
         "전년대비감축률": rate_prev,
-        "3개년평균감축률": rate_three
+        "3개년평균감축률": rate_three,
     }
 
 
-def compute_facility_feedback(target_year: int, year_to_raw: dict):
+def compute_facility_feedback(target_year: int, year_to_raw: dict[int, pd.DataFrame]):
     """
-    시트3 하단 두 개 표:
-    ① 기관별 피드백 요약
-    ② 관리대상 상세(O/X)
-    PDF의 기준 그대로 적용
-    """
+    시트3 하단: 소속기구별 피드백 2개 표 생성.
 
+    첫 번째 표(기관별 피드백 요약) 예시 열:
+      - 구분(기관명)
+      - 사용 분포 순위
+      - 3개년 평균 증가 순위
+      - 평균 에너지 사용량 순위
+      - 권장 에너지 사용량
+      - 권장 사용량 대비 비율
+
+    두 번째 표(관리대상 O/X 상세) 예시 열:
+      - 구분(기관명)
+      - 면적대비 에너지 과사용 여부
+      - 3개년 평균 증가 여부
+      - 권장 사용량 대비 과다 여부
+      - 종합 관리대상 (O/X)
+
+    ⚠ 구체적인 조건/임계값은 반드시 예시 엑셀 시트3 수식을 확인해 맞춰야 한다.
+    """
     if target_year not in year_to_raw:
+        st.error(f"{target_year}년 데이터가 존재하지 않습니다.")
         return None, None
 
+    years = sorted(year_to_raw.keys())
+    target_idx = years.index(target_year)
     df = year_to_raw[target_year].copy()
 
-    # -----------------------
-    # 권장 사용량 (기관별)
-    # -----------------------
-    prev_year = target_year - 1
-    if prev_year in year_to_raw:
-        prev_df = year_to_raw[prev_year]
-        recommended_each = prev_df["에너지사용량"] * (1 - 0.0417)
+    # 기본 지표
+    total_u = df["U"].sum()
+    df["사용분포"] = df["U"] / total_u if total_u != 0 else 0
+
+    # 3개년 평균 U (기관별)
+    prev_years = years[max(0, target_idx - 3):target_idx]
+    if prev_years:
+        history = {}
+        for y in prev_years:
+            df_y = year_to_raw[y][["기관명", "U"]].copy().set_index("기관명")
+            history[y] = df_y["U"]
+        hist_df = pd.DataFrame(history)
+        df = df.set_index("기관명")
+        df["3개년평균U"] = hist_df.mean(axis=1)
+        df["3개년평균U"] = df["3개년평균U"].fillna(0)
+        df["3개년증가율"] = df.apply(
+            lambda row: (row["U"] - row["3개년평균U"]) / row["3개년평균U"]
+            if row["3개년평균U"] != 0
+            else None,
+            axis=1,
+        )
+        df = df.reset_index()
     else:
-        recommended_each = df["에너지사용량"]
+        df["3개년평균U"] = None
+        df["3개년증가율"] = None
 
-    total_u = df["에너지사용량"].sum()
+    # 시설군 평균 W
+    w_group_mean = df.groupby("시설구분")["W"].mean().to_dict()
+    df["시설군평균W"] = df["시설구분"].map(w_group_mean)
+    df["W비율"] = df["W"] / df["시설군평균W"]
 
-    # -----------------------
-    # 3개항목 순위
-    # -----------------------
-    # 사용 분포 순위(에너지비중)
-    df["에너지비중"] = df["에너지사용량"] / total_u
-    df["사용분포순위"] = df["에너지비중"].rank(ascending=False).astype(int)
-
-    # 3개년 평균 증가 순위
-    prev_years = [y for y in year_to_raw.keys() if y < target_year]
-    prev_years = prev_years[-3:]
-    if len(prev_years) > 0:
-        prev_u_mean = pd.concat(
-            [year_to_raw[y]["에너지사용량"] for y in prev_years],
-            axis=1
-        ).mean(axis=1)
-        increase_rate = (df["에너지사용량"] - prev_u_mean) / prev_u_mean
+    # 권장 사용량 (기관별) = 직전연도 기관별 U * (1 - NDC_RATE)
+    if target_idx == 0:
+        df["권장사용량"] = df["U"]
     else:
-        increase_rate = pd.Series([0]*len(df))
+        prev_year = years[target_idx - 1]
+        df_prev = year_to_raw[prev_year][["기관명", "U"]].copy().set_index("기관명")
+        df = df.set_index("기관명")
+        df["직전연도U"] = df_prev["U"]
+        df["권장사용량"] = df["직전연도U"] * (1 - NDC_RATE)
+        df = df.reset_index()
 
-    df["증가순위"] = increase_rate.rank(ascending=False).astype(int)
-
-    # 연면적 대비 평균(W) 기준 순위
-    df["면적대비에너지"] = df["에너지사용량"] / df["연면적"]
-    df["평균에너지순위"] = df["면적대비에너지"].rank(ascending=False).astype(int)
-
-    # -----------------------
-    # 권장 사용량 대비 비율
-    # -----------------------
-    df["권장사용량"] = recommended_each.values
-    df["권장대비비율"] = df["에너지사용량"] / df["권장사용량"]
-
-    # -----------------------
-    # 관리대상 O/X (3개 플래그)
-    # -----------------------
-    # PDF 기준에 따라 그대로 적용:
-    # ① 면적대비 에너지 과사용(O/X)
-    #    기준 = 시설군 평균 대비 > 1.1 (PDF 실제값 분석 기반)
-    facility_group_avg = df.groupby("시설구분")["면적대비에너지"].mean().to_dict()
-    df["과사용"] = df.apply(
-        lambda row: "O" if (row["면적대비에너지"] /
-                            facility_group_avg[row["시설구분"]]) > 1.1 else "X",
-        axis=1
+    df["권장대비비율"] = df.apply(
+        lambda row: row["U"] / row["권장사용량"]
+        if row["권장사용량"] not in (0, None)
+        else None,
+        axis=1,
     )
 
-    # ② 에너지 급증 여부 = 3개년 평균 대비 증가율 > 20%
-    df["급증"] = df.apply(
-        lambda row: "O" if row["에너지사용량"] > row["권장사용량"] * 1.2 else "X",
-        axis=1
+    # ---- 표1: 순위/비율 요약 ----
+    df_rank = df.copy()
+
+    # 순위: 값이 클수록 높은 사용/증가 → 1위
+    df_rank["사용분포순위"] = df_rank["사용분포"].rank(ascending=False, method="min")
+    df_rank["증가율순위"] = df_rank["3개년증가율"].rank(ascending=False, method="min")
+    df_rank["W순위"] = df_rank["W"].rank(ascending=False, method="min")
+
+    table1 = df_rank[
+        [
+            "기관명",
+            "사용분포순위",
+            "증가율순위",
+            "W순위",
+            "권장사용량",
+            "권장대비비율",
+        ]
+    ].rename(
+        columns={
+            "기관명": "구분",
+            "사용분포순위": "사용분포순위",
+            "증가율순위": "3개년평균증가순위",
+            "W순위": "평균에너지사용량순위",
+        }
     )
 
-    # ③ 권장량 대비 매우 초과 = 권장대비비율 > 1.5
-    df["권장초과"] = df["권장대비비율"].apply(lambda x: "O" if x > 1.5 else "X")
+    # ---- 표2: 관리대상 O/X 플래그 ----
+    # ⚠ 아래 임계값은 "예시 엑셀 시트3의 실제 기준"과 맞춰 조정해야 함
+    W_EXCESS_THRESHOLD = 1.0      # 예: 시설군 평균 대비 W비율 > 1.0 이면 과사용
+    INCREASE_THRESHOLD = 0.0      # 예: 3개년 평균 대비 증가(>0) 시 위험
+    RECOMM_EXCESS_THRESHOLD = 1.0  # 예: 권장사용량 이상(>=1.0) 이면 과다
 
-    # 최종 관리 대상 = 3개 중 하나라도 O
-    df["관리대상"] = df.apply(
-        lambda row: "O" if ("O" in [row["과사용"], row["급증"], row["권장초과"]]) else "X",
-        axis=1
+    df_flag = df.copy()
+    df_flag["면적대비과사용"] = df_flag["W비율"].apply(
+        lambda v: "O" if v is not None and v > W_EXCESS_THRESHOLD else "X"
+    )
+    df_flag["3개년증가"] = df_flag["3개년증가율"].apply(
+        lambda v: "O" if v is not None and v > INCREASE_THRESHOLD else "X"
+    )
+    df_flag["권장초과"] = df_flag["권장대비비율"].apply(
+        lambda v: "O" if v is not None and v > RECOMM_EXCESS_THRESHOLD else "X"
     )
 
-    # -----------------------
-    # 최종 출력용 데이터프레임 2개
-    # -----------------------
-    df_feedback1 = df[[
-        "기관명", "사용분포순위", "증가순위", "평균에너지순위",
-        "권장사용량", "권장대비비율", "관리대상"
-    ]]
+    def _agg_flag(row):
+        flags = [row["면적대비과사용"], row["3개년증가"], row["권장초과"]]
+        return "O" if any(f == "O" for f in flags) else "X"
 
-    df_feedback2 = df[[
-        "기관명", "과사용", "급증", "권장초과"
-    ]]
+    df_flag["에너지사용량관리대상"] = df_flag.apply(_agg_flag, axis=1)
 
-    return df_feedback1, df_feedback2
+    table2 = df_flag[
+        [
+            "기관명",
+            "면적대비과사용",
+            "3개년증가",
+            "권장초과",
+            "에너지사용량관리대상",
+        ]
+    ].rename(columns={"기관명": "구분"})
+
+    return table1, table2
