@@ -531,29 +531,36 @@ def main() -> None:
     fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
 
     # -------------------------------------------------------
-    # 1. 에너지 사용량 파일 로딩 (항상 시도)
+    # 1. 에너지 사용량 파일 로딩
+    #    - 우선 업로드 탭에서 생성해 둔 캐시(year_to_raw_cache)를 사용
+    #    - 캐시가 없을 때만 load_energy_files()를 호출
     # -------------------------------------------------------
-    year_to_file = get_year_to_file()
-    year_to_raw: Dict[int, pd.DataFrame] = {}
-    df_raw_all: Optional[pd.DataFrame] = None
+    year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
+        "year_to_raw_cache", {}
+    )
+    df_raw_all: Optional[pd.DataFrame] = st.session_state.get(
+        "df_raw_all_cache"
+    )
 
-    if year_to_file:
-        try:
-            year_to_raw, df_raw_all = load_energy_files(year_to_file)
-        except Exception as e:
-            st.warning(
-                "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
-                "업로드 탭에서 파일을 다시 확인해 주세요."
-            )
-            st.exception(e)
+    # 캐시가 아직 없다면, 현재 인식된 파일 목록으로부터 새로 로딩
+    if not year_to_raw:
+        year_to_file = get_year_to_file()
 
-    # 🔹 만약 방금 로딩에 실패해서 year_to_raw가 비어 있는데,
-    #    업로드 탭에서 만들어둔 캐시가 있다면 그걸 대신 사용
-    if (not year_to_raw) and "year_to_raw_cache" in st.session_state:
-        year_to_raw = st.session_state.get("year_to_raw_cache", {})
-        df_raw_all = st.session_state.get("df_raw_all_cache", df_raw_all)
+        if year_to_file:
+            try:
+                year_to_raw, df_raw_all = load_energy_files(year_to_file)
+                # 로딩에 성공하면 캐시로 저장
+                st.session_state["year_to_raw_cache"] = year_to_raw
+                st.session_state["df_raw_all_cache"] = df_raw_all
+            except Exception as e:
+                st.warning(
+                    "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
+                    "업로드 탭에서 파일을 다시 확인해 주세요."
+                )
+                st.exception(e)
 
     years_available = sorted(year_to_raw.keys())
+
 
 
     # -------------------------------------------------------
