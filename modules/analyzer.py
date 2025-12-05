@@ -32,12 +32,15 @@ def build_sheet1_tables(year_to_raw: dict[int, pd.DataFrame]):
 
     # -------------------------------
     # ① 연도 × 기관 에너지 사용량(U)
+    #   - 기관명이 중복될 수 있으므로 반드시 groupby 후 집계
     # -------------------------------
     df_u = pd.DataFrame(index=org_order)
 
     for y in years:
-        df = year_to_raw[y].set_index("기관명")
-        s = df["U"]
+        df = year_to_raw[y]
+        # 기관별 에너지 사용량 합계 (중복 제거)
+        s = df.groupby("기관명", as_index=True)["U"].sum()
+        # 기관 순서에 맞춰 재정렬
         s = s.reindex(org_order)
         df_u[y] = s
 
@@ -46,12 +49,14 @@ def build_sheet1_tables(year_to_raw: dict[int, pd.DataFrame]):
 
     # -------------------------------
     # ② 연도 × 기관 연면적
+    #   - 마찬가지로 기관별 집계 후 사용
     # -------------------------------
     df_area = pd.DataFrame(index=org_order)
 
     for y in years:
-        df = year_to_raw[y].set_index("기관명")
-        s = df["연면적"]
+        df = year_to_raw[y]
+        # 기관별 연면적 합계 (중복 제거)
+        s = df.groupby("기관명", as_index=True)["연면적"].sum()
         s = s.reindex(org_order)
         df_area[y] = s
 
@@ -180,12 +185,13 @@ def compute_facility_sheet2(target_year: int, year_to_raw: dict[int, pd.DataFram
     # 3개년 평균 대비 증감률
     prev_years = years[max(0, target_idx - 3):target_idx]
     if prev_years:
-        # 기관별 U 이력 집계
+        # 기관별 U 이력 집계 (중복 제거 후 사용)
         history = {}
         for y in prev_years:
-            df_y = year_to_raw[y][["기관명", "U"]].copy()
-            df_y = df_y.set_index("기관명")
-            history[y] = df_y["U"]
+            df_y = year_to_raw[y]
+            s_y = df_y.groupby("기관명", as_index=True)["U"].sum()
+            history[y] = s_y
+
         hist_df = pd.DataFrame(history)
         three_mean = hist_df.mean(axis=1)
 
@@ -319,8 +325,10 @@ def compute_facility_feedback(target_year: int, year_to_raw: dict[int, pd.DataFr
     if prev_years:
         history = {}
         for y in prev_years:
-            df_y = year_to_raw[y][["기관명", "U"]].copy().set_index("기관명")
-            history[y] = df_y["U"]
+            df_y = year_to_raw[y]
+            s_y = df_y.groupby("기관명", as_index=True)["U"].sum()
+            history[y] = s_y
+
         hist_df = pd.DataFrame(history)
         df = df.set_index("기관명")
         df["3개년평균U"] = hist_df.mean(axis=1)
@@ -346,9 +354,11 @@ def compute_facility_feedback(target_year: int, year_to_raw: dict[int, pd.DataFr
         df["권장사용량"] = df["U"]
     else:
         prev_year = years[target_idx - 1]
-        df_prev = year_to_raw[prev_year][["기관명", "U"]].copy().set_index("기관명")
+        df_prev_raw = year_to_raw[prev_year]
+        df_prev = df_prev_raw.groupby("기관명", as_index=True)["U"].sum()
+
         df = df.set_index("기관명")
-        df["직전연도U"] = df_prev["U"]
+        df["직전연도U"] = df_prev
         df["권장사용량"] = df["직전연도U"] * (1 - NDC_RATE)
         df = df.reset_index()
 
