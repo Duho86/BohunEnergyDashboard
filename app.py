@@ -145,8 +145,6 @@ elif tab == "📊 대시보드":
     with col2:
         st.markdown("### 🏢 소속기구별 분석 (시트2 하단)")
         df_fac = compute_facility_sheet2(target_year, year_to_raw)
-            def compute_overall_feedback(target_year: int, year_to_raw: dict):
-            st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
 
         if df_fac is None:
             st.error("소속기구별 분석을 생성할 수 없습니다.")
@@ -180,8 +178,6 @@ st.write("디버그 - 선택 연도:", target_year)
 st.markdown("### 📌 공단 전체 기준 (시트3 상단)")
 
 fb_all = compute_overall_feedback(target_year, year_to_raw)
-    def compute_overall_feedback(target_year: int, year_to_raw: dict):
-    st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
 
 
 if fb_all is None:
@@ -205,8 +201,6 @@ else:
 st.markdown("### 🏢 소속기구별 피드백 (시트3 하단)")
 
 fb_facility = compute_facility_feedback(target_year, year_to_raw)
-    def compute_overall_feedback(target_year: int, year_to_raw: dict):
-    st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
     
 if fb_facility is None or fb_facility[0] is None or fb_facility[1] is None:
     st.error("소속기구별 피드백(시트3 하단)을 계산하지 못했습니다. analyzer.compute_facility_feedback 로직과 연도별 데이터를 확인하세요.")
