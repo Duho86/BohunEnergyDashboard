@@ -398,7 +398,7 @@ def render_upload_tab(
             st.exception(e)
             return
 
-    # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
+      # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
     if df_raw_all is None or df_raw_all.empty:
         st.info("아직 df_raw 데이터가 없어 백데이터 분석 표를 생성할 수 없습니다.")
         return
@@ -411,15 +411,40 @@ def render_upload_tab(
         st.exception(e)
         return
 
+    # 공통: 구분 컬럼은 포맷 적용 안 함 (연도 문자열 그대로 표시)
+    no_format_for_label = {"구분": ""}
+
     # 7) 표 렌더링
     st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
     tbl_usage_fmt = format_table(
         tbl_usage,
         fmt_rules,
-        column_fmt_map={},
-        default_fmt_name="energy_kwh_int",
+        column_fmt_map=no_format_for_label,
+        # 숫자: 정수, 천단위 콤마, 단위 없음
+        default_fmt_name="integer_comma",
     )
-    st.dataframe(tbl_usage_fmt, use_container_width=True)
+    st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 2. 연도×기관 연면적")
+    tbl_area_fmt = format_table(
+        tbl_area,
+        fmt_rules,
+        column_fmt_map=no_format_for_label,
+        default_fmt_name="integer_comma",
+    )
+    st.dataframe(tbl_area_fmt, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 3. 연도별 3개년 평균 에너지 사용량")
+    tbl_avg3_fmt = format_table(
+        tbl_avg3,
+        fmt_rules,
+        column_fmt_map=no_format_for_label,
+        default_fmt_name="integer_comma",
+    )
+    st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
+
 
     st.markdown("---")
     st.markdown("### 2. 연도×기관 연면적")
