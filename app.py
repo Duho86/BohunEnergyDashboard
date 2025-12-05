@@ -106,7 +106,13 @@ elif tab == "📊 대시보드":
     # -----------------------------
     # (시트2 상단) 공단 전체 분석
     # -----------------------------
+    st.write("디버그 - year_to_raw keys:", list(year_to_raw.keys()))
+    st.write("디버그 - 선택 연도:", target_year)
+
     overall = compute_overall_sheet2(target_year, year_to_raw)
+        def compute_overall_feedback(target_year: int, year_to_raw: dict):
+        st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
+    
     if overall is None:
         st.error("데이터 문제로 분석이 불가합니다.")
         st.stop()
@@ -141,6 +147,8 @@ elif tab == "📊 대시보드":
     with col2:
         st.markdown("### 🏢 소속기구별 분석 (시트2 하단)")
         df_fac = compute_facility_sheet2(target_year, year_to_raw)
+            def compute_overall_feedback(target_year: int, year_to_raw: dict):
+            st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
 
         if df_fac is None:
             st.error("소속기구별 분석을 생성할 수 없습니다.")
@@ -159,34 +167,53 @@ elif tab == "📊 대시보드":
 
     st.divider()
 
-    # ==========================================================
-    # 시트3 — 피드백
-    # ==========================================================
+# ==========================================================
+# 시트3 — 피드백
+# ==========================================================
 
-    st.header("피드백 (시트3)")
+st.header("피드백 (시트3)")
 
-    # -----------------------
-    # (시트3 상단) 공단 전체 피드백
-    # -----------------------
-    st.markdown("### 📌 공단 전체 기준 (시트3 상단)")
-    fb_all = compute_overall_feedback(target_year, year_to_raw)
+# -----------------------
+# (시트3 상단) 공단 전체 피드백
+# -----------------------
+st.write("디버그 - year_to_raw keys:", list(year_to_raw.keys()))
+st.write("디버그 - 선택 연도:", target_year)
 
-    df_fb_all = pd.DataFrame({
-        "항목": ["권장 에너지 사용량", "전년대비 감축률", "3개년 대비 감축률"],
-        "값": [
-            fb_all["권장사용량"],
-            fb_all["전년대비감축률"],
-            fb_all["3개년평균감축률"],
-        ]
-    })
+st.markdown("### 📌 공단 전체 기준 (시트3 상단)")
+
+fb_all = compute_overall_feedback(target_year, year_to_raw)
+    def compute_overall_feedback(target_year: int, year_to_raw: dict):
+    st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
+
+
+if fb_all is None:
+    st.error("공단 전체 피드백(시트3 상단)을 계산하지 못했습니다. year_to_raw 또는 target_year 데이터를 확인하세요.")
+else:
+    df_fb_all = pd.DataFrame(
+        {
+            "항목": ["권장 에너지 사용량", "전년대비 감축률", "3개년 대비 감축률"],
+            "값": [
+                fb_all.get("권장사용량"),
+                fb_all.get("전년대비감축률"),
+                fb_all.get("3개년평균감축률"),
+            ],
+        }
+    )
     st.dataframe(df_fb_all, use_container_width=True)
 
-    # -----------------------
-    # (시트3 하단) 소속기구별 피드백 2개 표
-    # -----------------------
-    st.markdown("### 🏢 소속기구별 피드백 (시트3 하단)")
+# -----------------------
+# (시트3 하단) 소속기구별 피드백 2개 표
+# -----------------------
+st.markdown("### 🏢 소속기구별 피드백 (시트3 하단)")
 
-    df_fb1, df_fb2 = compute_facility_feedback(target_year, year_to_raw)
+fb_facility = compute_facility_feedback(target_year, year_to_raw)
+    def compute_overall_feedback(target_year: int, year_to_raw: dict):
+    st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
+    
+if fb_facility is None or fb_facility[0] is None or fb_facility[1] is None:
+    st.error("소속기구별 피드백(시트3 하단)을 계산하지 못했습니다. analyzer.compute_facility_feedback 로직과 연도별 데이터를 확인하세요.")
+else:
+    df_fb1, df_fb2 = fb_facility
 
     st.markdown("#### ① 기관별 피드백 요약")
     st.dataframe(df_fb1, use_container_width=True)
