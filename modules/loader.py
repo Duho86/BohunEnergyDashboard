@@ -252,7 +252,9 @@ def load_energy_files(
     for year in sorted(year_to_file.keys()):
         file_obj = year_to_file[year]
         try:
-            df_original = pd.read_excel(file_obj)
+            # ❗ 헤더가 2행(인덱스 1)에 있으므로 header=1 로 지정
+            #    필요하면 sheet_name="에너지 사용량관리" 처럼 시트명을 명시해도 됨.
+            df_original = pd.read_excel(file_obj, sheet_name=0, header=1)
         except Exception as e:
             _log_error(f"{year}년 에너지 사용량 파일을 읽는 중 오류가 발생했습니다: {e}")
             raise
