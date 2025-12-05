@@ -1,4 +1,4 @@
-# modules/loader.py
+# modules/loader.py 상단부 일부만 교체
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import pandas as pd
 try:
     import streamlit as st
 except ImportError:  # noqa: D401
-    # Streamlit이 없는 환경(단위 테스트 등)에서도 동작하도록 하기 위한 fallback
     st = None  # type: ignore[assignment]
 
 
@@ -20,12 +19,11 @@ except ImportError:  # noqa: D401
 # 1. 경로 / 공통 유틸
 # =======================================================================
 
+# loader.py 기준 프로젝트 루트 (…/BohunEnergyDashboard)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SPEC_PATH = PROJECT_ROOT / "data" / "master_energy_spec.json"
 
 
 def _log_error(msg: str) -> None:
-    """Streamlit 환경이면 st.error, 아니면 print로 에러 메시지를 출력."""
     if st is not None:
         st.error(msg)
     else:
@@ -33,11 +31,46 @@ def _log_error(msg: str) -> None:
 
 
 def _log_warning(msg: str) -> None:
-    """Streamlit 환경이면 st.warning, 아니면 print로 경고 메시지를 출력."""
     if st is not None:
         st.warning(msg)
     else:
         print(f"[WARN] {msg}")
+
+
+def _find_spec_path(spec_path: Optional[Union[str, Path]] = None) -> Path:
+    """
+    master_energy_spec.json 위치를 여러 후보 경로에서 순차적으로 탐색한다.
+
+    우선순위
+    1) 인자로 받은 spec_path
+    2) PROJECT_ROOT / "data" / "master_energy_spec.json"
+    3) PROJECT_ROOT / "master_energy_spec.json"
+    4) CWD / "data" / "master_energy_spec.json"
+    5) CWD / "master_energy_spec.json"
+    """
+    candidates = []
+
+    if spec_path is not None:
+        candidates.append(Path(spec_path))
+
+    candidates.extend(
+        [
+            PROJECT_ROOT / "data" / "master_energy_spec.json",
+            PROJECT_ROOT / "master_energy_spec.json",
+            Path.cwd() / "data" / "master_energy_spec.json",
+            Path.cwd() / "master_energy_spec.json",
+        ]
+    )
+
+    for p in candidates:
+        if p.is_file():
+            return p
+
+    # 전부 못 찾은 경우
+    msg = "사양 파일을 찾지 못했습니다: master_energy_spec.json"
+    msg_detail = "\n시도한 경로들:\n" + "\n".join(str(c) for c in candidates)
+    _log_error(msg_detail)
+    raise FileNotFoundError(msg)
 
 
 # =======================================================================
@@ -50,29 +83,15 @@ def load_spec(spec_path: Optional[Union[str, Path]] = None) -> dict:
     """
     master_energy_spec.json을 로드해서 dict로 반환한다.
 
-    Parameters
-    ----------
-    spec_path:
-        명시적인 경로를 넘기지 않으면 기본값 data/master_energy_spec.json 사용.
-
-    Raises
-    ------
-    FileNotFoundError:
-        spec 파일을 찾지 못한 경우.
-    json.JSONDecodeError:
-        JSON 파싱에 실패한 경우.
+    spec_path를 넘기지 않으면 _find_spec_path()가 여러 후보 경로를 탐색한다.
     """
-    path = Path(spec_path) if spec_path is not None else DEFAULT_SPEC_PATH
-
-    if not path.is_file():
-        msg = f"사양 파일을 찾지 못했습니다: {path.name}"
-        _log_error(msg)
-        raise FileNotFoundError(msg)
+    path = _find_spec_path(spec_path)
 
     with path.open("r", encoding="utf-8") as f:
         spec = json.load(f)
 
     return spec
+
 
 
 # =======================================================================
