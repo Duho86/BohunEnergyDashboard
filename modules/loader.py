@@ -10,7 +10,7 @@ import streamlit as st
 def _find_column_by_keywords(df, keywords, required=True, col_label=""):
     """
     df.columns 중에서 keywords 리스트의 모든 키워드를 포함하는 첫 컬럼을 반환.
-    못 찾으면 None (required=False) 또는 에러 메시지 출력 후 None.
+    못 찾으면 None (required=False) 또는 경고 메시지 출력 후 None.
     """
     cols = df.columns.tolist()
     target = None
@@ -22,9 +22,10 @@ def _find_column_by_keywords(df, keywords, required=True, col_label=""):
             break
 
     if target is None and required:
-        # 여기서는 st.stop 대신 None 반환만 하고,
-        # 상위 로직에서 시트/연도별로 건너뛰도록 함
-        st.warning(f"⚠ '{col_label}' 컬럼을 찾지 못했습니다. (키워드: {keywords}, cols={list(df.columns)})")
+        st.warning(
+            f"⚠ '{col_label}' 컬럼을 찾지 못했습니다. "
+            f"(키워드: {keywords}, cols={list(df.columns)})"
+        )
         return None
 
     return target
@@ -33,8 +34,10 @@ def _find_column_by_keywords(df, keywords, required=True, col_label=""):
 def _pick_org_column(df, used_cols):
     """
     기관명 컬럼 후보 찾기:
+
     1) 컬럼명에 기관/소속/사업장/시설/구분 등이 들어간 것 우선
     2) 그래도 없으면 숫자가 아닌(object) 컬럼 중, used_cols에 포함되지 않는 첫 컬럼
+    3) 그래도 없으면 used_cols에 포함되지 않는 '아무 컬럼이나' 첫 컬럼을 사용 (최종 fallback)
     """
     name_keywords = ["기관", "소속", "사업장", "시설", "구분", "사무소", "부서"]
 
@@ -52,6 +55,16 @@ def _pick_org_column(df, used_cols):
         if df[c].dtype == "object":
             return c
 
+    # 3차: 최종 fallback - used_cols를 제외한 어떤 컬럼이든 하나 사용
+    for c in df.columns:
+        if c not in used_cols:
+            st.warning(
+                f"⚠ 기관명 컬럼을 추론할 수 없어 '{c}' 컬럼을 기관명으로 임시 사용합니다. "
+                f"실제 엑셀 헤더를 확인해 주세요."
+            )
+            return c
+
+    # 정말 모든 컬럼이 used_cols 안에만 있는 극단적 상황
     return None
 
 
