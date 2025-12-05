@@ -147,4 +147,119 @@ def load_energy_raw_for_analysis(path: str):
     V_col = _find_column_by_keywords(
         df, ["면적", "에너지"], required=False, col_label="면적대비 에너지사용비율(V)"
     )
-    if
+    if V_col:
+        used_cols.add(V_col)
+
+    # 평균 에너지 사용량(W) (있으면 사용)
+    W_col = _find_column_by_keywords(
+        df, ["평균", "에너지"], required=False, col_label="평균 에너지 사용량(W)"
+    )
+    if W_col:
+        used_cols.add(W_col)
+
+    # 시설구분 (의료/복지/기타)
+    facility_col = _pick_facility_column(df, used_cols)
+    if facility_col:
+        used_cols.add(facility_col)
+
+    # --------------------------------------------------------
+    # 필요한 컬럼만 추출 및 리네이밍
+    # --------------------------------------------------------
+    use_cols = [org_col, U_col, area_col]
+    if V_col:
+        use_cols.append(V_col)
+    if W_col:
+        use_cols.append(W_col)
+    if facility_col:
+        use_cols.append(facility_col)
+
+    df_raw = df[use_cols].copy()
+
+    rename_map = {
+        org_col: "기관명",
+        U_col: "에너지사용량",
+        area_col: "연면적",
+    }
+    if V_col:
+        rename_map[V_col] = "면적대비사용비율"
+    if W_col:
+        rename_map[W_col] = "평균에너지사용량"
+    if facility_col:
+        rename_map[facility_col] = "시설구분"
+
+    df_raw = df_raw.rename(columns=rename_map)
+
+    # 시설구분이 없으면 일단 기타시설로 채움 (경고 메시지)
+    if "시설구분" not in df_raw.columns:
+        st.warning(
+            f"⚠ '{os.path.basename(path)}' ({sheet_name})에서 시설구분 컬럼을 찾지 못했습니다. "
+            "모든 행을 '기타시설'로 처리합니다."
+        )
+        df_raw["시설구분"] = "기타시설"
+
+    # --------------------------------------------------------
+    # 숫자형 변환
+    # --------------------------------------------------------
+    numeric_cols = ["에너지사용량", "연면적", "면적대비사용비율", "평균에너지사용량"]
+    for c in numeric_cols:
+        if c in df_raw.columns:
+            df_raw[c] = pd.to_numeric(df_raw[c], errors="coerce")
+
+            if df_raw[c].notna().sum() == 0:
+                st.error(
+                    f"❌ '{os.path.basename(path)}' ({sheet_name})의 '{c}' 컬럼을 숫자로 변환할 수 없습니다. "
+                    "데이터 형식을 확인해주세요."
+                )
+                return None
+
+    return df_raw
+
+
+# ============================================================
+# 2) 다중 연도 파일 관리
+# ============================================================
+def extract_year_from_filename(filename: str):
+    """
+    파일명에서 2021, 2022 같은 4자리 숫자를 추출하여 연도로 사용.
+    """
+    m = re.search(r"(20\d{2})", filename)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def load_all_years(upload_folder: str):
+    """
+    저장된 파일들을 모두 불러와
+    {연도: df_raw} 형태로 dict 반환.
+    연도별로 로딩 실패 시, 해당 연도는 건너뛰고 경고 메시지만 출력.
+    """
+    year_to_raw = {}
+
+    if not os.path.exists(upload_folder):
+        return year_to_raw
+
+    for filename in os.listdir(upload_folder):
+        if not filename.endswith(".xlsx"):
+            continue
+
+        year = extract_year_from_filename(filename)
+        if year is None:
+            st.warning(f"⚠ 파일명에서 연도를 추출하지 못해 건너뜀: {filename}")
+            continue
+
+        path = os.path.join(upload_folder, filename)
+        df_raw = load_energy_raw_for_analysis(path)
+
+        if df_raw is None:
+            st.error(f"❌ {year}년 파일 로딩 실패: {filename}")
+            continue
+
+        year_to_raw[year] = df_raw
+
+    # 연도 순 정렬
+    year_to_raw = dict(sorted(year_to_raw.items(), key=lambda x: x[0]))
+
+    if len(year_to_raw) == 0:
+        st.warning("⚠ 업로드된 연도별 에너지 사용량 파일에서 유효한 데이터를 찾지 못했습니다.")
+    return year_to_raw
