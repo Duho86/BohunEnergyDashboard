@@ -140,7 +140,7 @@ def format_table(df: pd.DataFrame,
 # ===========================================================
 # data_1 (업로드 탭용) 테이블 생성
 # ===========================================================
-def build_data1_tables(df_raw_all: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_data1_tables(df_raw_all: pd.DataFrame):
     """
     업로드 탭에서 사용하는 3개 표:
       1) 연도×기관 에너지 사용량(연단위)
@@ -148,17 +148,16 @@ def build_data1_tables(df_raw_all: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
       3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
     """
     df = df_raw_all.copy()
-    df["연단위"] = df["U"] + df["W"] + df["V"]
 
     years = sorted(df["연도"].unique())
     org_order = list(get_org_order())
 
-    # 1) 연도×기관 에너지 사용량
+    # 1) 연도×기관 에너지 사용량 (연단위)
     usage = (
         df.pivot_table(
             index="연도",
             columns="기관명",
-            values="연단위",
+            values="연단위",      # <- U/V/W 합계 아님. loader에서 제공한 연단위 값 그대로 사용
             aggfunc="sum",
             fill_value=0,
         )
@@ -183,22 +182,18 @@ def build_data1_tables(df_raw_all: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
 
     # 3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
     avg3 = pd.DataFrame(index=years, columns=usage.columns, dtype=float)
-
     for y in years:
-        prev_years = [py for py in years if py < y]
-        prev_years = prev_years[-3:]
+        prev_years = [py for py in years if py < y][-3:]
         if not prev_years:
             baseline = usage.loc[y]
         else:
             baseline = usage.loc[prev_years].mean()
         avg3.loc[y] = baseline
 
-    # index를 '구분' 컬럼으로 되돌리기
     def _reset_index_as_label(df_in: pd.DataFrame) -> pd.DataFrame:
         out = df_in.copy()
         out.insert(0, "구분", out.index.astype(str))
-        out = out.reset_index(drop=True)
-        return out
+        return out.reset_index(drop=True)
 
     return (
         _reset_index_as_label(usage),
