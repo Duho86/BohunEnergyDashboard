@@ -1,4 +1,4 @@
-# app.py
+# app.py 상단부
 
 from __future__ import annotations
 
@@ -9,6 +9,23 @@ from typing import Dict, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# 🔍 진단용: modules.loader / modules.analyzer import 시 에러를 그대로 화면에 표시
+try:
+    from modules.loader import (
+        load_spec,
+        load_energy_files,
+        get_org_order,
+    )
+    from modules.analyzer import (
+        build_data_2_usage_analysis,
+        build_data_3_feedback,
+    )
+except Exception as e:
+    st.error("내부 모듈(modules.loader / modules.analyzer) import 중 오류가 발생했습니다. 아래 상세 메시지를 확인해 주세요.")
+    st.exception(e)
+    st.stop()
+
 
 from modules.loader import (
     load_spec,
