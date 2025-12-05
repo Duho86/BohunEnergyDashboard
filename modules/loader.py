@@ -92,28 +92,37 @@ def _extract_year_from_filename(filename):
 
 
 def load_all_years(upload_folder: str):
+    """
+    업로드 폴더에 있는 'YYYY년 에너지 사용량관리.xlsx' 파일을 모두 읽어서
+    {연도: df_raw} 딕셔너리와, 로딩 중 발생한 오류 메시지 리스트를 함께 반환.
+    """
+    import os
+
     year_to_raw = {}
     errors = []
 
     if not os.path.exists(upload_folder):
-        return year_to_raw, errors
+        return {}, ["업로드 폴더가 존재하지 않습니다."]
 
     for fn in os.listdir(upload_folder):
-        if not fn.endswith(".xlsx"):
+        if not fn.lower().endswith(".xlsx"):
             continue
 
-        year = _extract_year_from_filename(fn)
-        if year is None:
-            errors.append(f"연도 식별 실패: {fn}")
+        # 파일명에서 연도 추출: '2024년 에너지 사용량관리.xlsx' 형태 가정
+        try:
+            year_str = str(fn).split("년")[0]
+            year = int(year_str)
+        except Exception:
+            errors.append(f"연도를 파일명에서 추출하지 못했습니다: {fn}")
             continue
 
         path = os.path.join(upload_folder, fn)
 
-        df_raw = load_energy_raw_for_analysis(path)
-        if df_raw is None:
-            errors.append(f"{year}년 파일 로딩 실패: {fn}")
-            continue
+        try:
+            df_raw = load_energy_raw_for_analysis(path)  # 이미 loader 안에 구현된 함수
+            year_to_raw[year] = df_raw
+        except Exception as e:
+            errors.append(f"{year}년 파일 로딩 실패: {fn} ({e})")
 
-        year_to_raw[year] = df_raw
-
-    return dict(sorted(year_to_raw.items())), errors
+    # ✅ 항상 (dict, list) 두 개를 반환
+    return year_to_raw, errors
