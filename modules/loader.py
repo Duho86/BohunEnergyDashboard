@@ -40,7 +40,7 @@ def load_energy_raw_for_analysis(path: str):
 
     try:
         df = pd.read_excel(path)
-    except:
+    except Exception:
         st.error(f"❌ 파일을 읽는 데 실패했습니다: {path}")
         return None
 
@@ -48,7 +48,6 @@ def load_energy_raw_for_analysis(path: str):
     df.columns = df.columns.map(lambda x: str(x).strip())
 
     # 기관명 컬럼(C열이라는 전제) 자동 탐색
-    # 실제 엑셀 시트 구조를 보면 C열이 '구분' 또는 '기관명' 역할을 수행
     possible_org_cols = [c for c in df.columns if "구분" in c or "기관" in c or "소속" in c]
 
     if len(possible_org_cols) == 0:
@@ -73,7 +72,6 @@ def load_energy_raw_for_analysis(path: str):
                            col_label="연면적")
 
     # ③ 면적당 에너지(또는 온실가스) 사용비율(V)
-    # 시트2·3의 표 기준으로 "면적대비", "비율" 등의 표현이 있음
     V_col = find_column(df,
                         keywords=["면적", "비"],
                         required=False,
@@ -97,13 +95,17 @@ def load_energy_raw_for_analysis(path: str):
     df_raw = df[use_cols].copy()
 
     # 컬럼명 정규화
-    df_raw = df_raw.rename(columns={
+    rename_map = {
         org_col: "기관명",
         U_col: "에너지사용량",
         area_col: "연면적",
-        V_col: "면적대비사용비율" if V_col else None,
-        W_col: "평균에너지사용량" if W_col else None
-    })
+    }
+    if V_col:
+        rename_map[V_col] = "면적대비사용비율"
+    if W_col:
+        rename_map[W_col] = "평균에너지사용량"
+
+    df_raw = df_raw.rename(columns=rename_map)
 
     # 숫자형 변환
     numeric_cols = ["에너지사용량", "연면적", "면적대비사용비율", "평균에너지사용량"]
@@ -139,6 +141,9 @@ def load_all_years(upload_folder: str):
     """
     year_to_raw = {}
 
+    if not os.path.exists(upload_folder):
+        return year_to_raw
+
     for filename in os.listdir(upload_folder):
         if not filename.endswith(".xlsx"):
             continue
@@ -159,4 +164,3 @@ def load_all_years(upload_folder: str):
     if len(year_to_raw) == 0:
         st.warning("⚠ 업로드된 연도별 에너지 사용량 파일이 없습니다.")
     return year_to_raw
-
