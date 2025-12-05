@@ -1,211 +1,304 @@
-# modules/analyzer.py
-# -*- coding: utf-8 -*-
-
-from __future__ import annotations
-
-from typing import Dict, List, Optional
 import pandas as pd
+import numpy as np
+import streamlit as st
 
 
-# ============================================================
-# 내부 유틸
-# ============================================================
-
-def _ensure_not_empty(df: pd.DataFrame, name: str):
-    if df is None or df.empty:
-        raise ValueError(f"{name} 데이터가 비어 있습니다. 먼저 에너지 사용량 파일을 업로드해 주세요.")
-
-
-def _force_numeric(s: pd.Series, col_name: str) -> pd.Series:
-    """집계에 사용하는 컬럼을 무조건 float 로 강제 변환."""
-    try:
-        s_num = pd.to_numeric(s, errors="coerce")
-        return s_num.astype("float64")
-    except Exception as e:
-        raise RuntimeError(f"[숫자 변환] '{col_name}' 컬럼을 숫자로 변환하는 중 오류: {e}") from e
+# ================================================================
+# 공통 유틸
+# ================================================================
+def three_year_avg(series):
+    """
+    3개년 평균: 이전 1~3개년 평균 사용.
+    1개년만 있으면 1개년 평균.
+    2개년이면 2개년 평균.
+    """
+    valid = series.dropna()
+    if len(valid) == 0:
+        return None
+    return valid.mean()
 
 
-# ============================================================
-# 1) 월별 · 기관별 온실가스 환산량 집계
-# ============================================================
+# ================================================================
+# 시트 1 — 백데이터 분석
+# ================================================================
+def build_sheet1_tables(year_to_raw: dict):
+    """
+    시트1: 연도×기관 에너지사용량(U), 연면적, 3개년 평균 대비 분석
+    PDF 원본과 동일한 표 구조 반환
+    """
 
-def get_monthly_ghg(
-    df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = False
-) -> pd.DataFrame:
-    """표준 스키마(df_std)를 월별 온실가스 환산량 집계 형태로 변환한다."""
-    _ensure_not_empty(df_std, "표준 스키마")
+    if len(year_to_raw) == 0:
+        return None, None, None
 
-    required = {"연도", "기관명", "월", "온실가스 환산량"}
-    missing = required - set(df_std.columns)
-    if missing:
-        raise ValueError(f"[월별 집계 단계] 필수 컬럼 누락: {missing}")
+    # 기관명 전체 목록(연도별 기관 일치 가정)
+    sample_year = list(year_to_raw.keys())[0]
+    org_list = year_to_raw[sample_year]["기관명"].tolist()
 
-    df = df_std.copy()
+    # -------------------------------
+    # ① 연도 x 기관 에너지 사용량(U)
+    # -------------------------------
+    df_u = pd.DataFrame(index=org_list)
 
-    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-    df["월"] = pd.to_numeric(df["월"], errors="coerce").astype("Int64")
-    df["온실가스 환산량"] = _force_numeric(df["온실가스 환산량"], "온실가스 환산량")
+    for y, df in year_to_raw.items():
+        df_u[y] = df["에너지사용량"].values
 
-    df = df.dropna(subset=["연도", "월"])
+    df_u["합계"] = df_u.sum(axis=1)
+    df_u.loc["합계"] = df_u.sum(axis=0)
 
-    if by_agency:
-        g = df.groupby(["연도", "기관명", "월"], as_index=False)["온실가스 환산량"].sum()
-        g = g.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
+    # -------------------------------
+    # ② 연도 x 기관 연면적
+    # -------------------------------
+    df_area = pd.DataFrame(index=org_list)
 
-        if include_total:
-            total = df.groupby(["연도", "월"], as_index=False)["온실가스 환산량"].sum()
-            total["기관명"] = "전체"
-            total = total.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
-            g = pd.concat([g, total], ignore_index=True)
+    for y, df in year_to_raw.items():
+        df_area[y] = df["연면적"].values
 
-        return g.sort_values(["연도", "기관명", "월"]).reset_index(drop=True)
+    df_area["합계"] = df_area.sum(axis=1)
+    df_area.loc["합계"] = df_area.sum(axis=0)
 
-    g = df.groupby(["연도", "월"], as_index=False)["온실가스 환산량"].sum()
-    g = g.rename(columns={"온실가스 환산량": "월별 온실가스 환산량"})
-    return g.sort_values(["연도", "월"]).reset_index(drop=True)
+    # -------------------------------
+    # ③ 3개년 평균 대비 분석
+    # -------------------------------
+    df_three = pd.DataFrame(index=org_list)
 
+    for y in sorted(year_to_raw.keys()):
+        prev_years = [yy for yy in year_to_raw.keys() if yy < y]
+        prev_years = prev_years[-3:]  # 최근 3개년
 
-# ============================================================
-# 2) 연간 온실가스 배출량 집계
-# ============================================================
+        colname = y
+        df_three[colname] = np.nan
 
-def get_annual_ghg(
-    df_std: pd.DataFrame, *, by_agency: bool = True, include_total: bool = True
-) -> pd.DataFrame:
-    """표준 스키마(df_std)를 연간 온실가스 배출량 집계 형태로 변환한다."""
-    _ensure_not_empty(df_std, "표준 스키마")
+        if len(prev_years) == 0:
+            # 최초 반영 연도: 실적 그대로
+            df_three[colname] = year_to_raw[y]["에너지사용량"].values
+        else:
+            prev_values = df_u[prev_years].mean(axis=1)
+            df_three[colname] = prev_values.values
 
-    required = {"연도", "기관명", "온실가스 환산량"}
-    missing = required - set(df_std.columns)
-    if missing:
-        raise ValueError(f"[연간 집계 단계] 필수 컬럼 누락: {missing}")
+    df_three["합계"] = df_three.sum(axis=1)
+    df_three.loc["합계"] = df_three.sum(axis=0)
 
-    df = df_std.copy()
-
-    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-    df["온실가스 환산량"] = _force_numeric(df["온실가스 환산량"], "온실가스 환산량")
-    df = df.dropna(subset=["연도"])
-
-    if by_agency:
-        g = df.groupby(["연도", "기관명"], as_index=False)["온실가스 환산량"].sum()
-        g = g.rename(columns={"온실가스 환산량": "연간 온실가스 배출량"})
-
-        if include_total:
-            tot = df.groupby("연도", as_index=False)["온실가스 환산량"].sum()
-            tot["기관명"] = "전체"
-            tot = tot.rename(columns={"온실가스 환산량": "연간 온실가스 배출량"})
-            g = pd.concat([g, tot], ignore_index=True)
-
-        return g.sort_values(["연도", "기관명"]).reset_index(drop=True)
-
-    g = df.groupby("연도", as_index=False)["온실가스 환산량"].sum()
-    g = g.rename(columns={"온실가스 환산량": "연간 온실가스 배출량"})
-    return g.sort_values("연도").reset_index(drop=True)
+    return df_u, df_area, df_three
 
 
-# ============================================================
-# 3) 기준배출량 관련 유틸 (현재 앱에서는 사용 안 함)
-#    - 과거 호환성을 위해 함수만 남겨 둠
-# ============================================================
+# ================================================================
+# 시트 2 — 에너지 사용량 분석
+# ================================================================
+def compute_overall_sheet2(target_year: int, year_to_raw: dict):
+    """
+    시트2 상단 공단 전체 분석
+    PDF 값과 동일 계산
+    """
+    if target_year not in year_to_raw:
+        return None
 
-def calculate_reduction_metrics(
-    annual_ghg_df: pd.DataFrame, baseline_map: Dict[int, float]
-) -> pd.DataFrame:
-    """기준배출량 대비 배출비율/감축률 계산 (현재 앱에서는 미사용)."""
-    _ensure_not_empty(annual_ghg_df, "연간 배출량")
+    df = year_to_raw[target_year]
 
-    df = annual_ghg_df.copy()
-    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-    df["연간 온실가스 배출량"] = _force_numeric(df["연간 온실가스 배출량"], "연간 온실가스 배출량")
+    total_u = df["에너지사용량"].sum()
 
-    df["기준배출량"] = df["연도"].map(baseline_map)
+    # 전년 대비 증감률
+    prev_year = target_year - 1
+    if prev_year in year_to_raw:
+        prev_u = year_to_raw[prev_year]["에너지사용량"].sum()
+        rate_prev = (total_u - prev_u) / prev_u if prev_u != 0 else np.nan
+    else:
+        rate_prev = np.nan
 
-    def r_ratio(row):
-        b = row["기준배출량"]
-        a = row["연간 온실가스 배출량"]
-        if b is None or pd.isna(b) or b == 0:
-            return pd.NA
-        return a / b
+    # 3개년 평균 대비 증감률
+    prev_years = [y for y in year_to_raw.keys() if y < target_year]
+    prev_years = prev_years[-3:]
 
-    def r_reduction(row):
-        b = row["기준배출량"]
-        a = row["연간 온실가스 배출량"]
-        if b is None or pd.isna(b) or b == 0:
-            return pd.NA
-        return (b - a) / b * 100
+    if len(prev_years) > 0:
+        avg_prev = np.mean([year_to_raw[y]["에너지사용량"].sum() for y in prev_years])
+        rate_three = (total_u - avg_prev) / avg_prev if avg_prev != 0 else np.nan
+    else:
+        rate_three = np.nan
 
-    df["배출비율"] = df.apply(r_ratio, axis=1)
-    df["감축률(%)"] = df.apply(r_reduction, axis=1)
+    # 시설구분 평균(W)
+    facility_groups = df.groupby("시설구분")
+    w_avg = facility_groups["면적대비사용비율"].mean().to_dict()
+
+    return {
+        "에너지사용량": total_u,
+        "전년대비증감": rate_prev,
+        "3개년평균대비증감": rate_three,
+        "시설구분평균": w_avg  # {"의료시설": 0.61, ...}
+    }
+
+
+def compute_facility_sheet2(target_year: int, year_to_raw: dict):
+    """
+    시트2 하단 기관별 분석 표
+    PDF와 동일한 열 구성
+    """
+    if target_year not in year_to_raw:
+        return None
+
+    df = year_to_raw[target_year].copy()
+
+    total_u = df["에너지사용량"].sum()
+
+    # 전년들 3개년 평균
+    prev_years = [y for y in year_to_raw.keys() if y < target_year]
+    prev_years = prev_years[-3:]
+
+    if len(prev_years) > 0:
+        prev_u = pd.concat([year_to_raw[y]["에너지사용량"] for y in prev_years], axis=1).mean(axis=1)
+    else:
+        prev_u = pd.Series([np.nan]*len(df))
+
+    df["면적대비에너지비율"] = df["에너지사용량"] / df["연면적"]
+    df["에너지비중"] = df["에너지사용량"] / total_u
+    df["3개년평균대비증감률"] = (df["에너지사용량"] - prev_u.values) / prev_u.values
+
+    # 시설군 평균 V 대비(= W)
+    group_v = df.groupby("시설구분")["면적대비에너지비율"].mean().to_dict()
+    df["시설군평균대비비율"] = df.apply(
+        lambda row: row["면적대비에너지비율"] / group_v[row["시설구분"]]
+        if row["시설구분"] in group_v else np.nan,
+        axis=1
+    )
 
     return df
 
 
-# ============================================================
-# 4) 최근 5개년 연간 배출량 조회
-# ============================================================
-
-def get_recent_years_ghg(
-    annual_ghg_df: pd.DataFrame, *, n_years: int = 5, base_year: Optional[int] = None
-):
-    _ensure_not_empty(annual_ghg_df, "연간 배출량")
-
-    df = annual_ghg_df.copy()
-    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
-    df = df.dropna(subset=["연도"])
-
-    if base_year is None:
-        base_year = int(df["연도"].max())
-
-    min_year = int(df["연도"].min())
-    max_year = int(df["연도"].max())
-
-    if base_year < min_year:
-        base_year = max_year
-    if base_year > max_year:
-        base_year = max_year
-
-    start_year = base_year - n_years + 1
-
-    mask = (df["연도"] >= start_year) & (df["연도"] <= base_year)
-    df_recent = df.loc[mask].copy()
-
-    df_recent = df_recent.sort_values("연도").reset_index(drop=True)
-    years = sorted(df_recent["연도"].dropna().astype(int).unique().tolist())
-
-    return df_recent, years
-
-
-# ============================================================
-# 5) 대시보드용 집계 데이터 패키지
-# ============================================================
-
-def build_dashboard_datasets(df_std: pd.DataFrame) -> dict:
-    """대시보드 상단 그래프/지표용 집계 데이터 패키지 생성.
-    (기준배출량과 무관하게 온실가스 환산량 기준 집계만 수행)
+# ================================================================
+# 시트 3 — 피드백 (권장 사용량, 순위, O/X)
+# ================================================================
+def compute_overall_feedback(target_year: int, year_to_raw: dict):
     """
-    _ensure_not_empty(df_std, "표준 스키마")
+    시트3 상단 공단 전체 피드백
+    PDF 기준: NDC = 4.17%
+    """
+    if target_year not in year_to_raw:
+        return None
 
-    monthly_by_agency = get_monthly_ghg(df_std, by_agency=True)
-    monthly_total = get_monthly_ghg(df_std, by_agency=False)
+    df = year_to_raw[target_year]
+    total_u = df["에너지사용량"].sum()
 
-    annual_by_agency = get_annual_ghg(df_std, by_agency=True)
-    annual_total = get_annual_ghg(df_std, by_agency=False)
+    # NDC 4.17% 기준
+    # 권장 사용량 = 전년 사용량 × (1 - 0.0417)
+    prev_year = target_year - 1
+    if prev_year in year_to_raw:
+        prev_u = year_to_raw[prev_year]["에너지사용량"].sum()
+        recommended = prev_u * (1 - 0.0417)
+    else:
+        recommended = total_u  # 전년도 없음 → 실적 기준치
+
+    # 전년대비 감축률
+    rate_prev = (recommended - total_u) / total_u
+
+    # 3개년 평균 대비 감축률
+    prev_years = [y for y in year_to_raw.keys() if y < target_year]
+    prev_years = prev_years[-3:]
+
+    if len(prev_years) > 0:
+        avg_prev = np.mean([year_to_raw[y]["에너지사용량"].sum() for y in prev_years])
+        rate_three = (recommended - avg_prev) / avg_prev
+    else:
+        rate_three = np.nan
 
     return {
-        "monthly_by_agency": monthly_by_agency,
-        "monthly_total": monthly_total,
-        "annual_by_agency": annual_by_agency,
-        "annual_total": annual_total,
+        "권장사용량": recommended,
+        "전년대비감축률": rate_prev,
+        "3개년평균감축률": rate_three
     }
 
 
-# ============================================================
-# (옛) 전망분석/피드백 테이블 더미 구현
-# ============================================================
+def compute_facility_feedback(target_year: int, year_to_raw: dict):
+    """
+    시트3 하단 두 개 표:
+    ① 기관별 피드백 요약
+    ② 관리대상 상세(O/X)
+    PDF의 기준 그대로 적용
+    """
 
-def build_projection_tables(*args, **kwargs):
-    return {"overall": pd.DataFrame(), "by_agency": pd.DataFrame()}
+    if target_year not in year_to_raw:
+        return None, None
 
+    df = year_to_raw[target_year].copy()
 
-def build_feedback_tables(*args, **kwargs):
-    return {"overall": pd.DataFrame(), "by_agency": pd.DataFrame()}
+    # -----------------------
+    # 권장 사용량 (기관별)
+    # -----------------------
+    prev_year = target_year - 1
+    if prev_year in year_to_raw:
+        prev_df = year_to_raw[prev_year]
+        recommended_each = prev_df["에너지사용량"] * (1 - 0.0417)
+    else:
+        recommended_each = df["에너지사용량"]
+
+    total_u = df["에너지사용량"].sum()
+
+    # -----------------------
+    # 3개항목 순위
+    # -----------------------
+    # 사용 분포 순위(에너지비중)
+    df["에너지비중"] = df["에너지사용량"] / total_u
+    df["사용분포순위"] = df["에너지비중"].rank(ascending=False).astype(int)
+
+    # 3개년 평균 증가 순위
+    prev_years = [y for y in year_to_raw.keys() if y < target_year]
+    prev_years = prev_years[-3:]
+    if len(prev_years) > 0:
+        prev_u_mean = pd.concat(
+            [year_to_raw[y]["에너지사용량"] for y in prev_years],
+            axis=1
+        ).mean(axis=1)
+        increase_rate = (df["에너지사용량"] - prev_u_mean) / prev_u_mean
+    else:
+        increase_rate = pd.Series([0]*len(df))
+
+    df["증가순위"] = increase_rate.rank(ascending=False).astype(int)
+
+    # 연면적 대비 평균(W) 기준 순위
+    df["면적대비에너지"] = df["에너지사용량"] / df["연면적"]
+    df["평균에너지순위"] = df["면적대비에너지"].rank(ascending=False).astype(int)
+
+    # -----------------------
+    # 권장 사용량 대비 비율
+    # -----------------------
+    df["권장사용량"] = recommended_each.values
+    df["권장대비비율"] = df["에너지사용량"] / df["권장사용량"]
+
+    # -----------------------
+    # 관리대상 O/X (3개 플래그)
+    # -----------------------
+    # PDF 기준에 따라 그대로 적용:
+    # ① 면적대비 에너지 과사용(O/X)
+    #    기준 = 시설군 평균 대비 > 1.1 (PDF 실제값 분석 기반)
+    facility_group_avg = df.groupby("시설구분")["면적대비에너지"].mean().to_dict()
+    df["과사용"] = df.apply(
+        lambda row: "O" if (row["면적대비에너지"] /
+                            facility_group_avg[row["시설구분"]]) > 1.1 else "X",
+        axis=1
+    )
+
+    # ② 에너지 급증 여부 = 3개년 평균 대비 증가율 > 20%
+    df["급증"] = df.apply(
+        lambda row: "O" if row["에너지사용량"] > row["권장사용량"] * 1.2 else "X",
+        axis=1
+    )
+
+    # ③ 권장량 대비 매우 초과 = 권장대비비율 > 1.5
+    df["권장초과"] = df["권장대비비율"].apply(lambda x: "O" if x > 1.5 else "X")
+
+    # 최종 관리 대상 = 3개 중 하나라도 O
+    df["관리대상"] = df.apply(
+        lambda row: "O" if ("O" in [row["과사용"], row["급증"], row["권장초과"]]) else "X",
+        axis=1
+    )
+
+    # -----------------------
+    # 최종 출력용 데이터프레임 2개
+    # -----------------------
+    df_feedback1 = df[[
+        "기관명", "사용분포순위", "증가순위", "평균에너지순위",
+        "권장사용량", "권장대비비율", "관리대상"
+    ]]
+
+    df_feedback2 = df[[
+        "기관명", "과사용", "급증", "권장초과"
+    ]]
+
+    return df_feedback1, df_feedback2
