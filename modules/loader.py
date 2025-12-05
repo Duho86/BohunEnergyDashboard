@@ -41,14 +41,33 @@ def load_energy_raw_for_analysis(path: str):
             return None
 
     # --------- 월별 에너지 사용량 컬럼 탐색 ---------
-    month_cols = []
-    for c in df.columns:
-        if c.startswith("에너지사용량"):
-            month_cols.append(c)
+# 월별 컬럼을 정확히 12개 이름으로 인식
+expected_month_cols = [
+    "에너지사용량",
+    "에너지사용량.1",
+    "에너지사용량.2",
+    "에너지사용량.3",
+    "에너지사용량.4",
+    "에너지사용량.5",
+    "에너지사용량.6",
+    "에너지사용량.7",
+    "에너지사용량.8",
+    "에너지사용량.9",
+    "에너지사용량.10",
+    "에너지사용량.11",
+]
 
-    if len(month_cols) != 12:
-        st.error(f"❌ 월별 에너지사용량 컬럼이 12개가 아닙니다. 실제={len(month_cols)}")
-        return None
+# 실제 파일에 존재하는 월별 컬럼만 추출
+month_cols = [c for c in expected_month_cols if c in df.columns]
+
+if len(month_cols) != 12:
+    st.error(
+        f"❌ 월별 12개 에너지사용량 컬럼 중 일부가 파일에 존재하지 않습니다.\n"
+        f"   찾은 컬럼 개수 = {len(month_cols)} / 12\n"
+        f"   실제 포함된 컬럼 = {month_cols}"
+    )
+    return None
+
 
     # 월 정렬 (에너지사용량, 에너지사용량.1, ..., 에너지사용량.11)
     month_cols = sorted(month_cols, key=lambda x: (len(x), x))
