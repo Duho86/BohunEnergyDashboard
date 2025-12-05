@@ -1,137 +1,150 @@
+import json
 import os
 import re
+from typing import Dict, Optional, Tuple, List
+
 import pandas as pd
 import streamlit as st
+
+SPEC_PATH = "master_energy_spec.json"
+
+
+@st.cache_data(show_spinner=False)
+def load_spec() -> dict:
+    if not os.path.exists(SPEC_PATH):
+        st.error(f"사양 파일을 찾지 못했습니다: {SPEC_PATH}")
+        return {}
+    with open(SPEC_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _extract_year_from_filename(filename: str) -> Optional[int]:
+    m = re.search(r"(20\d{2})", filename)
+    return int(m.group(1)) if m else None
 
 
 # ============================================================
 # (1) 단일 파일 → df_raw 생성
 # ============================================================
 
-def load_energy_raw_for_analysis(path: str):
-    """
-    업로드된 《에너지 사용량관리.xlsx》 파일을 df_raw 형태로 변환하고 반환한다.
-
-    ▣ 이 함수는 다음 조건을 만족해야 한다 (요구사항 0~1절 반영):
-        - df_std 사용 금지
-        - df_raw 만 사용
-        - U/V/W/연면적은 "열 인덱스"가 아닌 "헤더 문자열" 기반 매핑
-        - 엑셀 원본 헤더와 동일한 문자열 기반 탐색
-        - 찾지 못하면 임의 계산 금지, 명시적 오류
-        - 숫자형 변환 필수
-        - 월별 1~12월 존재해야 함 (예시 파일 기준)
-        - 기관명/시설구분/연면적 컬럼은 헤더 자동 탐색으로 확정
-
-    반환 df_raw 컬럼:
-        ['기관명', '시설구분', '연면적', 'U', 'V', 'W']
-    """
-
-    # --------------------------
-    # ① 파일 읽기
-    # --------------------------
+def _read_raw_excel(path: str) -> pd.DataFrame:
+    """공통 엑셀 로더 (header=1)."""
     try:
-        # 예시 엑셀 구조: 0행은 header title row, 실제 헤더는 row1
         df = pd.read_excel(path, sheet_name=0, header=1)
     except Exception as e:
         st.error(f"❌ 파일 로딩 실패: {os.path.basename(path)} ({e})")
-        return None
+        return pd.DataFrame()
 
     if df is None or df.empty:
         st.error(f"❌ 파일 데이터가 비어 있습니다: {os.path.basename(path)}")
+        return pd.DataFrame()
+
+    df.columns = df.columns.map(str)
+    return df
+
+
+def load_energy_raw_for_analysis(path: str, year: Optional[int] = None) -> Optional[pd.DataFrame]:
+    """
+    업로드된 《에너지 사용량관리.xlsx》 파일을 df_raw 형태로 변환하고 반환한다.
+
+    JSON logic.rules 에서 사용하는 필드명을 기준으로 컬럼을 탐색한다.
+      - 연도(year)       : 파일명에서 추출
+      - 소속기관명(org)  : '소속기관명', '기관명', '소속기관' 등
+      - 연단위(U)        : '연단위'
+      - 연면적(area)     : '연면적', '연면적/설비용량' 등
+      - 시설구분          : '시설구분', '사업군' 등
+      - 면적당 온실가스  : '면적당' + '온실가스'
+
+    반환 df_raw 컬럼:
+      ['연도', '기관명', '시설구분', '연면적', 'U', 'V', 'W']
+    """
+    df = _read_raw_excel(path)
+    if df.empty:
         return None
 
-    df.columns = df.columns.map(str)  # 문자열 통일
+    # -------------------------------
+    # 기본 컬럼 탐색
+    # -------------------------------
+    def pick(col_candidates: List[str], must: bool = True, human_name: str = "") -> Optional[str]:
+        cols = [c for c in df.columns if any(k in c for k in col_candidates)]
+        if not cols:
+            if must:
+                st.error(f"❌ '{human_name or '/'.join(col_candidates)}' 컬럼을 찾지 못했습니다.")
+            return None
+        return cols[0]
 
-    # ============================================================
-    # (2) 기관명 / 시설구분 / 연면적 자동 탐색
-    # ============================================================
+    org_col = pick(["소속기관명", "기관명", "소속기관"], human_name="소속기관명/기관명")
+    fac_col = pick(["시설구분", "사업군", "용도", "구분"], human_name="시설구분/사업군")
+    area_col = pick(["연면적", "면적"], human_name="연면적")
+    # 연단위 사용량 (없으면 월합계 사용)
+    annual_col = pick(["연단위"], must=False)
+    # 면적당 온실가스
+    v_col = pick(["면적당", "온실가스"], must=False)
 
-    # -- 기관명 후보 (예시 엑셀: '소속기관명')
-    org_candidates = [
-        c for c in df.columns
-        if any(k in c for k in ["소속기관명", "기관명", "소속기관", "부서명", "기관"])
-    ]
-    if not org_candidates:
-        st.error("❌ 기관명(예: '소속기관명') 컬럼을 찾지 못했습니다.")
-        return None
-    org_col = org_candidates[0]
-
-    # -- 시설구분 후보 (예: '사업군', '시설구분', '용도')
-    facility_candidates = [
-        c for c in df.columns
-        if any(k in c for k in ["사업군", "시설구분", "용도", "구분"])
-    ]
-    if not facility_candidates:
-        st.error("❌ 시설구분(예: '사업군') 컬럼을 찾지 못했습니다.")
-        return None
-    facility_col = facility_candidates[0]
-
-    # -- 연면적 후보 (예: '연면적', '연면적/설비용량')
-    area_candidates = [
-        c for c in df.columns
-        if ("연면적" in c) or ("면적" in c)
-    ]
-    if not area_candidates:
-        st.error("❌ 연면적(예: '연면적/설비용량') 컬럼을 찾지 못했습니다.")
-        return None
-    area_col = area_candidates[0]
-
-    # ============================================================
-    # (3) 월별 1~12월 컬럼 존재 여부 확인
-    # ============================================================
-
-    month_cols = [f"{m}월" for m in range(1, 13)]
-    missing = [c for c in month_cols if c not in df.columns]
-
-    if missing:
-        st.error(
-            f"❌ 월별 에너지 사용량 컬럼(1월~12월) 중 일부가 누락되었습니다.\n"
-            f"   누락 컬럼: {missing}"
-        )
+    if org_col is None or fac_col is None or area_col is None:
         return None
 
-    # 월별 숫자형 변환
-    for c in month_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # ============================================================
-    # (4) U / W / V 생성
-    # ============================================================
-
-    # -- U: 연간 에너지 사용량 (원본 '연단위'가 있으면 그대로 사용)
-    if "연단위" in df.columns and df["연단위"].notna().sum() > 0:
-        U = pd.to_numeric(df["연단위"], errors="coerce")
+    # -------------------------------
+    # 월별 사용량 → U/W 생성
+    # -------------------------------
+    month_cols = [c for c in df.columns if re.fullmatch(r"\d{1,2}월", c)]
+    use_month = False
+    if annual_col is None or df[annual_col].isna().all():
+        # 연단위가 없으면 월합계로
+        if month_cols:
+            use_month = True
+        else:
+            # '사용년월' 패턴
+            ym_col = None
+            for c in df.columns:
+                if "사용년월" in c:
+                    ym_col = c
+                    break
+            if ym_col is None:
+                st.error("❌ 연단위/월별 사용량/사용년월 컬럼을 찾지 못했습니다.")
+                return None
+            # 사용년월별 집계는 월별 그래프에서만 사용하므로,
+            # 여기서는 연간 합계만 계산
+            df["__년"] = df[ym_col].astype(str).str.slice(0, 4)
+            df["__U_from_ym"] = pd.to_numeric(df.get("에너지사용량", 0), errors="coerce")
+            annual_series = df.groupby([org_col, "__년"])["__U_from_ym"].sum()
     else:
-        U = df[month_cols].sum(axis=1)
+        annual_series = pd.to_numeric(df[annual_col], errors="coerce")
 
-    # -- W: 평균 에너지 사용량 (월평균)
-    W = df[month_cols].mean(axis=1)
+    if use_month:
+        for c in month_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["__U_from_month"] = df[month_cols].sum(axis=1)
+        annual_series = df["__U_from_month"]
 
-    # -- V: 면적당 온실가스 배출량
-    v_candidates = [
-        c for c in df.columns
-        if ("온실가스" in c and "면적" in c)
-        or ("면적당" in c and "가스" in c)
-    ]
-    if not v_candidates:
-        st.error("❌ '면적당 온실가스 배출량' 컬럼을 찾지 못했습니다.")
-        return None
-    V = pd.to_numeric(df[v_candidates[0]], errors="coerce")
+    # W: 월평균 (월 컬럼이 있을 때만)
+    if month_cols:
+        W = df[month_cols].mean(axis=1)
+    else:
+        # 월 정보가 없으면 12개월로 균등 가정
+        W = annual_series / 12.0
 
-    # ============================================================
-    # (5) df_raw 최종 생성
-    # ============================================================
+    # V: 면적당 온실가스 배출량
+    if v_col:
+        V = pd.to_numeric(df[v_col], errors="coerce")
+    else:
+        V = pd.Series([None] * len(df))
 
     df_raw = pd.DataFrame()
-    df_raw["기관명"] = df[org_col]
-    df_raw["시설구분"] = df[facility_col]
+    df_raw["기관명"] = df[org_col].astype(str).str.strip()
+    df_raw["시설구분"] = df[fac_col].astype(str).str.strip()
     df_raw["연면적"] = pd.to_numeric(df[area_col], errors="coerce")
-    df_raw["U"] = U
-    df_raw["W"] = W
+    df_raw["U"] = pd.to_numeric(annual_series, errors="coerce")
+    df_raw["W"] = pd.to_numeric(W, errors="coerce")
     df_raw["V"] = V
 
-    # 숫자형 검증 (전체 NaN = 오류)
-    for col in ["U", "W", "V", "연면적"]:
+    # 연도 정보
+    if year is None:
+        year = None
+    df_raw["연도"] = year
+
+    # 숫자형 검증
+    for col in ["U", "W", "연면적"]:
         if df_raw[col].notna().sum() == 0:
             st.error(f"❌ '{col}' 값이 모두 NaN 입니다. 원본 파일을 확인하세요.")
             return None
@@ -140,28 +153,16 @@ def load_energy_raw_for_analysis(path: str):
 
 
 # ============================================================
-# (6) 다중 연도 파일 로딩
+# (2) 다중 연도 파일 로딩
 # ============================================================
 
-def _extract_year_from_filename(filename: str):
-    """파일명에서 20xx 년도 추출"""
-    m = re.search(r"(20\d{2})", filename)
-    return int(m.group(1)) if m else None
-
-
-def load_all_years(upload_folder: str):
+def load_all_years(upload_folder: str) -> Tuple[Dict[int, pd.DataFrame], List[str]]:
     """
     업로드 폴더 안의 연도별 파일들을 읽어:
         ({year: df_raw}, [에러메시지]) 반환.
-
-    요구사항:
-        - 실패한 연도는 완전히 제외
-        - 오류는 errors 리스트에 모두 보관
-        - app.py에서 get_year_to_raw()가 이 결과를 그대로 받아서 사용
     """
-
-    year_to_raw = {}
-    errors = []
+    year_to_raw: Dict[int, pd.DataFrame] = {}
+    errors: List[str] = []
 
     if not os.path.exists(upload_folder):
         errors.append("업로드 폴더가 존재하지 않습니다.")
@@ -177,18 +178,95 @@ def load_all_years(upload_folder: str):
             continue
 
         path = os.path.join(upload_folder, filename)
-
-        df_raw = load_energy_raw_for_analysis(path)
+        df_raw = load_energy_raw_for_analysis(path, year=year)
         if df_raw is None:
             errors.append(f"{year}년 파일 로딩 실패: {filename}")
             continue
 
         year_to_raw[year] = df_raw
 
-    # 연도 정렬
     year_to_raw = dict(sorted(year_to_raw.items(), key=lambda x: x[0]))
-
     if not year_to_raw:
         errors.append("유효한 연도 파일을 하나도 불러오지 못했습니다.")
 
     return year_to_raw, errors
+
+
+# ============================================================
+# (3) 월별 사용량 집계 (대시보드 그래프용)
+# ============================================================
+
+def load_monthly_usage(
+    upload_folder: str, year: int, org_filter: Optional[List[str]] = None
+) -> Optional[pd.DataFrame]:
+    """
+    특정 연도 파일에서 월별 에너지 사용량 집계.
+    - 1월~12월 열이 있으면 합계 사용
+    - 없고 '사용년월' 열이 있으면 해당 월을 추출
+    반환: index=월(1~12), column='에너지사용량'
+    """
+    # 해당 연도 파일 찾기
+    target_file = None
+    for filename in os.listdir(upload_folder):
+        if not filename.lower().endswith(".xlsx"):
+            continue
+        y = _extract_year_from_filename(filename)
+        if y == year:
+            target_file = os.path.join(upload_folder, filename)
+            break
+
+    if target_file is None:
+        st.error(f"{year}년 파일을 찾지 못했습니다.")
+        return None
+
+    df = _read_raw_excel(target_file)
+    if df.empty:
+        return None
+
+    # 기관 필터 적용
+    if org_filter:
+        # 기관 컬럼 탐색
+        org_col = None
+        for c in df.columns:
+            if any(k in c for k in ["소속기관명", "기관명", "소속기관"]):
+                org_col = c
+                break
+        if org_col:
+            df = df[df[org_col].astype(str).str.strip().isin(org_filter)]
+
+    # 1월~12월 열 우선
+    month_cols = [c for c in df.columns if re.fullmatch(r"\d{1,2}월", c)]
+    if month_cols:
+        for c in month_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        monthly = df[month_cols].sum(axis=0)
+        # '1월' -> 1
+        monthly.index = [int(m.replace("월", "")) for m in monthly.index]
+        monthly = monthly.sort_index()
+        return pd.DataFrame({"에너지사용량": monthly})
+
+    # 사용년월 열
+    ym_col = None
+    for c in df.columns:
+        if "사용년월" in c:
+            ym_col = c
+            break
+    if ym_col is None:
+        st.error("월별 사용량을 계산할 수 있는 컬럼(1월~12월, 사용년월)이 없습니다.")
+        return None
+
+    df["__사용년월"] = df[ym_col].astype(str)
+    df["__월"] = df["__사용년월"].str[-2:].astype(int)
+    # 에너지 사용량 컬럼 탐색
+    energy_col = None
+    for c in df.columns:
+        if "에너지" in c and "사용" in c:
+            energy_col = c
+            break
+    if energy_col is None:
+        st.error("사용년월 기반 집계를 위한 에너지 사용량 컬럼을 찾지 못했습니다.")
+        return None
+
+    df[energy_col] = pd.to_numeric(df[energy_col], errors="coerce")
+    monthly = df.groupby("__월")[energy_col].sum().sort_index()
+    return pd.DataFrame({"에너지사용량": monthly})
