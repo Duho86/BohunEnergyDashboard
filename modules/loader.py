@@ -12,7 +12,7 @@ import pandas as pd
 
 try:
     import streamlit as st
-except Exception:  # Streamlit 없이도 import 가능하도록
+except Exception:
     st = None  # type: ignore[assignment]
 
 
@@ -40,13 +40,6 @@ def _log_warning(msg: str) -> None:
 def _find_spec_path(spec_path: Optional[Union[str, Path]] = None) -> Path:
     """
     master_energy_spec.json 위치를 여러 후보 경로에서 순차적으로 탐색한다.
-
-    우선순위
-    1) 인자로 받은 spec_path
-    2) PROJECT_ROOT / "data" / "master_energy_spec.json"
-    3) PROJECT_ROOT / "master_energy_spec.json"
-    4) CWD / "data" / "master_energy_spec.json"
-    5) CWD / "master_energy_spec.json"
     """
     candidates = []
 
@@ -128,9 +121,8 @@ def get_org_order() -> Tuple[str, ...]:
 # 엑셀 → df_raw 변환을 위한 컬럼 정의
 # ===========================================================
 
-# 엑셀 원본 기준 필수 기본 컬럼
+# 엑셀 기본 필수 컬럼 (기관명은 없음: 연도별 파일에 따라 없을 수 있어서)
 RAW_BASE_COLUMNS = [
-    "기관명",
     "시설구분",
     "연면적",
 ]
@@ -231,6 +223,27 @@ def get_year_to_file() -> Dict[int, object]:
 # ===========================================================
 
 
+def _extract_org_series(df: pd.DataFrame, year: int) -> pd.Series:
+    """
+    기관명 컬럼이 없는 구버전 엑셀을 위해 다음 순서로 기관명을 추출한다.
+
+    1) '기관명' 컬럼이 있으면 → 그대로 사용
+    2) '소속기관', '소속기구', '소속기관명' 중 하나가 있으면 → 사용
+    3) 위가 모두 없고 '시설내역' 컬럼이 있으면 → 시설내역을 기관명으로 간주
+    4) 그래도 없으면 → '미상(연도 xxxx)' 고정 문자열 사용
+    """
+    candidates = ["기관명", "소속기관", "소속기구", "소속기관명"]
+    for col in candidates:
+        if col in df.columns:
+            return df[col].astype(str).str.strip()
+
+    if "시설내역" in df.columns:
+        return df["시설내역"].astype(str).str.strip()
+
+    # 마지막 fallback: 전부 동일한 라벨
+    return pd.Series([f"미상({year}년)"] * len(df), index=df.index, dtype=object)
+
+
 def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     """
     연도별 엑셀 시트를 df_raw 형식으로 변환한다.
@@ -238,9 +251,9 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     출력 컬럼:
       - 연도 (int)
       - year (int, 동일 값)
-      - 기관명 (문자열, strip)
+      - 기관명 (문자열)
       - org_name (기관명과 동일)
-      - 시설구분 (문자열, strip)
+      - 시설구분 (문자열)
       - 연면적 (float)
       - 연단위 (float, 12개 사용량 합계)
       - 개별 월 사용량 컬럼(에너지사용량, 에너지사용량2~12) 그대로 유지
@@ -250,11 +263,13 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
 
     df = _normalize_columns(df_original)
 
-    # 필수 컬럼 체크
+    # 필수 컬럼 체크 (기관명은 필수 아님)
     _ensure_columns(df, RAW_REQUIRED_COLUMNS)
 
-    # 기관명 / 시설구분 / 연면적
-    org = df["기관명"].astype(str).str.strip()
+    # 기관명 추출 (여러 컬럼 중에서 찾아서 사용)
+    org = _extract_org_series(df, year)
+
+    # 시설구분 / 연면적
     facility_type = df["시설구분"].astype(str).str.strip()
     area = pd.to_numeric(df["연면적"], errors="coerce")
 
@@ -281,7 +296,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
         }
     )
 
-    # 원본 사용량 컬럼도 함께 유지 (디버그용 + 필요 시 추가 계산용)
+    # 원본 사용량 컬럼도 함께 유지
     for col in RAW_ENERGY_COLUMNS:
         df_raw[col] = energy_df[col]
 
