@@ -108,6 +108,27 @@ elif tab == "📊 대시보드":
         target_year = st.sidebar.selectbox("이행연도 선택", years, index=len(years) - 1)
 
         # ----------------------------------------------------
+        # 🔍 소속기구 필터
+        # ----------------------------------------------------
+        df_target = year_to_raw[target_year]
+
+        org_list = sorted(df_target["기관명"].unique())
+        selected_orgs = st.sidebar.multiselect(
+            "소속기구 선택",
+            options=org_list,
+            default=org_list,
+        )
+
+        # 선택된 소속기구만 남긴 year_to_raw 생성
+        filtered_year_to_raw = {}
+        for y, df in year_to_raw.items():
+            df_y = df.copy()
+            if selected_orgs:
+                df_y = df_y[df_y["기관명"].isin(selected_orgs)]
+            filtered_year_to_raw[y] = df_y
+
+        
+        # ----------------------------------------------------
         # 상단: 에너지 사용량 추이 (레이아웃 유지)
         # ----------------------------------------------------
         st.header("에너지 사용량 추이")
@@ -118,7 +139,7 @@ elif tab == "📊 대시보드":
         with col_trend1:
             st.subheader("월별 에너지 사용량 추이")
 
-            df_year = year_to_raw[target_year]
+            df_year = filtered_year_to_raw[target_year]
 
             monthly_chart_drawn = False
 
@@ -148,7 +169,7 @@ elif tab == "📊 대시보드":
 
             data_year = []
             for y in years[-5:]:
-                total_u = year_to_raw[y]["U"].sum()
+                total_u = filtered_year_to_raw[y]["U"].sum()
                 data_year.append({"연도": y, "에너지사용량": total_u})
 
             df_trend_year = pd.DataFrame(data_year).set_index("연도")
@@ -167,7 +188,7 @@ elif tab == "📊 대시보드":
         with col2_1:
             st.markdown("### 📌 공단 전체 기준 (시트2 상단)")
 
-            overall = compute_overall_sheet2(target_year, year_to_raw)
+            overall = compute_overall_sheet2(target_year, filtered_year_to_raw)
             if overall is None:
                 st.error("공단 전체 기준 분석을 계산하지 못했습니다.")
             else:
@@ -201,7 +222,7 @@ elif tab == "📊 대시보드":
         with col2_2:
             st.markdown("### 🏢 소속기구별 분석 (시트2 하단)")
 
-            df_fac = compute_facility_sheet2(target_year, year_to_raw)
+            df_fac = compute_facility_sheet2(target_year, filtered_year_to_raw)
             if df_fac is None or df_fac.empty:
                 st.error("소속기구별 분석 표를 생성하지 못했습니다.")
             else:
@@ -217,7 +238,7 @@ elif tab == "📊 대시보드":
         # (상단) 공단 전체 피드백
         st.markdown("### 📌 공단 전체 피드백 (시트3 상단)")
 
-        fb_overall = compute_overall_feedback(target_year, year_to_raw)
+        fb_overall = compute_overall_feedback(target_year, filtered_year_to_raw)
         if fb_overall is None:
             st.error("공단 전체 피드백을 계산하지 못했습니다.")
         else:
@@ -236,7 +257,7 @@ elif tab == "📊 대시보드":
         # (하단) 소속기구별 피드백
         st.markdown("### 🏢 소속기구별 피드백 (시트3 하단)")
 
-        fb_fac1, fb_fac2 = compute_facility_feedback(target_year, year_to_raw)
+        fb_fac1, fb_fac2 = compute_facility_feedback(target_year, filtered_year_to_raw)
 
         if fb_fac1 is None or fb_fac2 is None:
             st.error("소속기구별 피드백 표를 계산하지 못했습니다.")
