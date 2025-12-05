@@ -3,206 +3,201 @@ import re
 import pandas as pd
 import streamlit as st
 
+# -----------------------------
+# Helper functions for column detection
+# -----------------------------
 
-# ============================================================
-# 공통 유틸: 컬럼 탐색
-# ============================================================
-def _find_column_by_keywords(df, keywords, required=True, col_label=""):
-    cols = df.columns.tolist()
-    target = None
-
-    for c in cols:
+def _find_col(df, required_substrings, col_label, required=True):
+    """
+    지정한 문자열들을 모두 포함하는 헤더를 가진 컬럼을 찾는다.
+    - required_substrings: ["에너지", "사용량"] 이런 식의 리스트
+    - 못 찾으면, required=True일 때 st.error 메시지 출력 후 None 반환
+    """
+    for c in df.columns:
         label = str(c)
-        if all(k in label for k in keywords):
-            target = c
-            break
-
-    if target is None and required:
-        st.warning(
-            f"⚠ '{col_label}' 컬럼을 찾지 못했습니다. "
-            f"(키워드: {keywords}, cols={list(df.columns)})"
-        )
-        return None
-
-    return target
-
-
-def _pick_org_column(df, used_cols):
-    """
-    기관명 컬럼을 아래 우선순위로 선택한다:
-    1) 컬럼명이 기관/소속/시설/구분/사업장/부서 등 포함
-    2) dtype == object 인 첫 번째 컬럼
-    3) used_cols 를 제외한 아무 컬럼이나 강제로 기관명으로 사용 (fallback)
-    """
-    name_keywords = ["기관", "소속", "사업장", "시설", "구분", "사무소", "부서"]
-
-    # 1차: 키워드 기반 탐색
-    for c in df.columns:
-        if any(k in str(c) for k in name_keywords):
-            if c not in used_cols:
-                return c
-
-    # 2차: object dtype 첫 컬럼
-    for c in df.columns:
-        if c in used_cols:
-            continue
-        if df[c].dtype == "object":
+        if all(sub in label for sub in required_substrings):
             return c
-
-    # 3차: 최종 fallback → 어떤 경우에도 기관명 하나 선택
-    for c in df.columns:
-        if c not in used_cols:
-            st.warning(
-                f"⚠ 기관명 컬럼 자동 탐색 실패 → '{c}' 컬럼을 기관명으로 임시 사용합니다."
-            )
-            return c
-
-    return None
-
-
-def _pick_facility_column(df, used_cols):
-    facility_keywords = ["시설구분", "시설 구분", "시설유형", "시설종류", "시설", "분류", "유형"]
-
-    for c in df.columns:
-        if any(k in str(c) for k in facility_keywords):
-            if c not in used_cols:
-                return c
-
-    return None
-
-
-# ============================================================
-# 1) 단일 파일 로더
-# ============================================================
-def load_energy_raw_for_analysis(path: str):
-    try:
-        sheets = pd.read_excel(path, sheet_name=None)
-    except Exception as e:
-        st.error(f"❌ 파일 읽기 실패: {path} ({e})")
-        return None
-
-    selected_df = None
-    selected_info = None
-
-    # 유효한 시트를 찾는 과정
-    for sheet_name, df in sheets.items():
-        if df is None or df.empty:
-            continue
-
-        df = df.copy()
-        df.columns = df.columns.map(lambda x: str(x).strip())
-
-        u_col = _find_column_by_keywords(df, ["에너지", "사용"], required=False)
-        area_col = _find_column_by_keywords(df, ["면적"], required=False)
-
-        if u_col and area_col:
-            selected_df = df
-            selected_info = (sheet_name, u_col, area_col)
-            break
-
-    if selected_df is None:
+    if required:
         st.error(
-            f"❌ '{os.path.basename(path)}'에서 에너지사용량(U)/연면적 컬럼을 둘 다 갖는 시트를 찾지 못했습니다."
+            f"❌ {col_label} 컬럼을 찾지 못했습니다. "
+            f"(필요 포함 문자열: {required_substrings}, 실제 컬럼: {list(df.columns)})"
         )
-        return None
-
-    sheet_name, U_col, area_col = selected_info
-    df = selected_df
-    used_cols = {U_col, area_col}
-
-    # 기관명 컬럼 선택 (fallback 포함)
-    org_col = _pick_org_column(df, used_cols)
-    if org_col is None:
-        st.error(f"❌ '{os.path.basename(path)}' ({sheet_name})에서 기관명 컬럼을 찾지 못했습니다.")
-        return None
-    used_cols.add(org_col)
-
-    # 선택적 컬럼
-    V_col = _find_column_by_keywords(df, ["면적", "에너지"], required=False)
-    if V_col:
-        used_cols.add(V_col)
-
-    W_col = _find_column_by_keywords(df, ["평균", "에너지"], required=False)
-    if W_col:
-        used_cols.add(W_col)
-
-    facility_col = _pick_facility_column(df, used_cols)
-    if facility_col:
-        used_cols.add(facility_col)
-
-    # 추출할 컬럼 목록
-    use_cols = [org_col, U_col, area_col]
-    if V_col:
-        use_cols.append(V_col)
-    if W_col:
-        use_cols.append(W_col)
-    if facility_col:
-        use_cols.append(facility_col)
-
-    df_raw = df[use_cols].copy()
-
-    rename_map = {
-        org_col: "기관명",
-        U_col: "에너지사용량",
-        area_col: "연면적",
-    }
-    if V_col:
-        rename_map[V_col] = "면적대비사용비율"
-    if W_col:
-        rename_map[W_col] = "평균에너지사용량"
-    if facility_col:
-        rename_map[facility_col] = "시설구분"
-
-    df_raw = df_raw.rename(columns=rename_map)
-
-    # 시설구분 없으면 기본값
-    if "시설구분" not in df_raw.columns:
-        st.warning(
-            f"⚠ '{os.path.basename(path)}' ({sheet_name})에서 시설구분 컬럼을 찾지 못했습니다. "
-            f"'기타시설'로 처리합니다."
-        )
-        df_raw["시설구분"] = "기타시설"
-
-    # 숫자형 변환
-    for col in ["에너지사용량", "연면적", "면적대비사용비율", "평균에너지사용량"]:
-        if col in df_raw.columns:
-            df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
-
-    return df_raw
-
-
-# ============================================================
-# 2) 연도별 로더
-# ============================================================
-def extract_year_from_filename(filename: str):
-    m = re.search(r"(20\d{2})", filename)
-    if m:
-        return int(m.group(1))
     return None
+
+
+def _find_org_col(df):
+    """
+    기관명(구분) 컬럼 탐색:
+    - 소속기관명, 소속기관, 기관명, 구분 등 이름에 기반해서만 찾는다.
+    - 못 찾으면 에러 출력 후 None.
+    """
+    candidates = [
+        c
+        for c in df.columns
+        if any(kw in str(c) for kw in ["소속기관명", "소속기관", "기관명", "구분"])
+    ]
+    if candidates:
+        return candidates[0]
+
+    st.error("❌ 기관명(구분) 컬럼을 찾지 못했습니다. (예: '소속기관명', '소속기관', '기관명')")
+    return None
+
+
+def _find_facility_col(df):
+    """
+    시설구분 컬럼 탐색:
+    - 시설구분, 시설 구분, 시설유형, 용도(구분) 등 이름 기반.
+    - 시트2/3에 필수이므로 못 찾으면 에러.
+    """
+    candidates = [
+        c
+        for c in df.columns
+        if any(kw in str(c) for kw in ["시설구분", "시설 구분", "시설유형", "용도", "용도구분"])
+    ]
+    if candidates:
+        return candidates[0]
+
+    st.error("❌ 시설구분 컬럼을 찾지 못했습니다. (예: '시설구분', '시설유형')")
+    return None
+
+
+# -----------------------------
+# Core loader
+# -----------------------------
+
+def load_energy_raw_for_analysis(path: str) -> pd.DataFrame | None:
+    """
+    단일 에너지 사용량 엑셀 파일을 읽어서 df_raw를 반환.
+
+    - df_raw는 원본 컬럼을 모두 유지하되, 다음 표준 컬럼을 추가한다.
+      * 기관명
+      * 시설구분
+      * U (에너지 사용량)
+      * V (면적당 온실가스 배출량)
+      * W (평균 에너지 사용량)
+      * 연면적
+
+    - 컬럼은 열 인덱스가 아니라 '헤더 문자열' 기반으로 탐색한다.
+    - 필수 컬럼을 찾지 못하면 st.error를 띄우고 None을 반환한다.
+    """
+    try:
+        # 기본 가정: 첫 번째 시트에 분석용 데이터가 있음
+        df = pd.read_excel(path, sheet_name=0)
+    except Exception as e:
+        st.error(f"❌ 엑셀 파일을 읽는 데 실패했습니다: {path} ({e})")
+        return None
+
+    if df.empty:
+        st.error(f"❌ 엑셀 파일에 데이터가 없습니다: {path}")
+        return None
+
+    # 공백 제거
+    df.columns = df.columns.map(lambda x: str(x).strip())
+
+    # 기관명 / 시설구분
+    org_col = _find_org_col(df)
+    facility_col = _find_facility_col(df)
+
+    if org_col is None or facility_col is None:
+        return None
+
+    # U / V / W / 연면적 컬럼 이름 탐색 (문자열 기준)
+    U_src = _find_col(
+        df,
+        required_substrings=["에너지", "사용량"],
+        col_label="에너지 사용량(U)",
+        required=True,
+    )
+    V_src = _find_col(
+        df,
+        required_substrings=["면적당", "온실가스"],
+        col_label="면적당 온실가스 배출량(V)",
+        required=True,
+    )
+    W_src = _find_col(
+        df,
+        required_substrings=["평균", "에너지", "사용량"],
+        col_label="평균 에너지 사용량(W)",
+        required=True,
+    )
+    area_src = _find_col(
+        df,
+        required_substrings=["연면적"],
+        col_label="연면적",
+        required=True,
+    )
+
+    # 필수 컬럼 중 하나라도 없으면 이 파일은 분석 대상에서 제외
+    if any(c is None for c in [U_src, V_src, W_src, area_src]):
+        return None
+
+    # 표준 컬럼 생성 (원본 컬럼은 그대로 두고 추가)
+    df["기관명"] = df[org_col]
+    df["시설구분"] = df[facility_col]
+    df["U"] = df[U_src]
+    df["V"] = df[V_src]
+    df["W"] = df[W_src]
+    df["연면적"] = df[area_src]
+
+    # 숫자형 변환 (필수)
+    for col in ["U", "V", "W", "연면적"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if df[col].notna().sum() == 0:
+            st.error(
+                f"❌ '{col}' 컬럼의 값을 숫자로 변환하지 못했습니다. "
+                f"원본 데이터를 확인해 주세요. (파일: {os.path.basename(path)})"
+            )
+            return None
+
+    return df
+
+
+# -----------------------------
+# 다중 연도 로더
+# -----------------------------
+
+def _extract_year_from_filename(filename: str) -> int | None:
+    """
+    파일명에서 4자리 연도(20xx)를 추출.
+    예: '에너지사용량_2024.xlsx' → 2024
+    """
+    m = re.search(r"(20\d{2})", filename)
+    if not m:
+        return None
+    return int(m.group(1))
 
 
 def load_all_years(upload_folder: str):
-    year_to_raw = {}
+    """
+    업로드 폴더 내의 .xlsx 파일들을 모두 읽어
+    ({연도: df_raw}, [오류 메시지 리스트]) 를 반환한다.
+
+    - 각 연도 파일은 load_energy_raw_for_analysis()로 처리한다.
+    - 특정 연도에서 로딩에 실패해도 다른 연도는 계속 진행한다.
+    """
+    year_to_raw: dict[int, pd.DataFrame] = {}
+    errors: list[str] = []
 
     if not os.path.exists(upload_folder):
-        return year_to_raw
+        return year_to_raw, errors
 
     for filename in os.listdir(upload_folder):
-        if not filename.endswith(".xlsx"):
+        if not filename.lower().endswith(".xlsx"):
             continue
 
-        year = extract_year_from_filename(filename)
+        year = _extract_year_from_filename(filename)
         if year is None:
-            st.warning(f"⚠ 연도를 찾지 못해 건너뜀: {filename}")
+            errors.append(f"파일명에서 연도를 찾지 못해 건너뜀: {filename}")
             continue
 
         path = os.path.join(upload_folder, filename)
         df_raw = load_energy_raw_for_analysis(path)
-
         if df_raw is None:
-            st.error(f"❌ {year}년 파일 로딩 실패: {filename}")
+            errors.append(f"{year}년 파일 로딩 실패: {filename}")
             continue
 
         year_to_raw[year] = df_raw
 
-    return dict(sorted(year_to_raw.items(), key=lambda x: x[0]))
+    # 연도 오름차순 정렬
+    year_to_raw = dict(sorted(year_to_raw.items(), key=lambda kv: kv[0]))
+    return year_to_raw, errors
