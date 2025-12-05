@@ -1,0 +1,462 @@
+{
+  "version": "1.0",
+  "meta": {
+    "description": "보훈공단 에너지 사용량·온실가스 분석을 위한 통합 JSON 사양. 엑셀에서 추출한 schema/formulas/raw data/rules와 출력 형식(data_1, data_2, data_3)에 대한 정의를 모두 포함한다.",
+    "notes": [
+      "1. data_(백데이터)20xx년.json : 프로그램 구동 시 업로드하는 에너지 사용량 데이터, 이 형식의 업로드 파일이 계산에 활용되는 것",
+      "2. data_1. 백데이터 분석 : 기존에 에너지 사용량 파일 업로드 아래에 그대로 출력 요청 했던 엑셀 서식",
+      "3. data_2. 에너지 사용량 분석, data_3. 피드백 : 기존에 에너지 사용량 추이 화면 아래에 그대로 출력 요청을 했던 엑셀 서식"
+    ],
+    "current_year": 2024,
+    "analysis_years": [2021, 2022, 2023, 2024],
+    "ndc_target_rate": 0.0417
+  },
+
+  "formatting_rules": {
+    "percent_2": {
+      "type": "number",
+      "display": "percent",
+      "decimal_places": 2,
+      "multiply_by_100": true,
+      "thousands_separator": false,
+      "suffix": "%"
+    },
+    "ratio_2": {
+      "type": "number",
+      "display": "ratio",
+      "decimal_places": 2,
+      "multiply_by_100": false,
+      "thousands_separator": false,
+      "suffix": ""
+    },
+    "integer_no_unit": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 0,
+      "thousands_separator": false,
+      "suffix": ""
+    },
+    "integer_comma": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 0,
+      "thousands_separator": true,
+      "suffix": ""
+    },
+    "energy_kwh_int": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 0,
+      "thousands_separator": true,
+      "suffix": "kWh"
+    },
+    "energy_ton_oil_eq": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 2,
+      "thousands_separator": true,
+      "suffix": "TOE"
+    },
+    "area_m2_int": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 0,
+      "thousands_separator": true,
+      "suffix": "㎡"
+    },
+    "co2_ton": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 2,
+      "thousands_separator": true,
+      "suffix": "tCO2eq"
+    },
+    "rank_int": {
+      "type": "number",
+      "display": "number",
+      "decimal_places": 0,
+      "thousands_separator": false,
+      "suffix": "위"
+    },
+    "text_default": {
+      "type": "string",
+      "display": "text"
+    }
+  },
+
+  "input": {
+    "schema": {
+      "description": "엑셀에서 추출한 schema.json의 sheets 배열 전체를 여기에 붙여 넣는다.",
+      "sheets": []
+    },
+
+    "formulas": {
+      "description": "엑셀에서 추출한 formulas.json의 sheets 배열 전체를 여기에 붙여 넣는다.",
+      "sheets": []
+    },
+
+    "raw_data": {
+      "description": "연도별 백데이터(JSON) 원본. data_(백데이터)20xx년.json 내용을 그대로 rows에 넣는다.",
+      "2021": {
+        "source_name": "data_(백데이터)2021년.json",
+        "rows": []
+      },
+      "2022": {
+        "source_name": "data_(백데이터)2022년.json",
+        "rows": []
+      },
+      "2023": {
+        "source_name": "data_(백데이터)2023년.json",
+        "rows": []
+      },
+      "2024": {
+        "source_name": "data_(백데이터)2024년.json",
+        "rows": []
+      }
+    }
+  },
+
+  "logic": {
+    "rules": {
+      "description": "백데이터(raw_data)를 이용해 data_1, data_2, data_3에 해당하는 출력 테이블을 생성하기 위한 계산 규칙 정의. 아래 calculations 배열은 엑셀 formulas.json을 해석해 정의한 규칙을 채우는 자리이다.",
+      "calculations": [
+        {
+          "name": "raw_annual_usage_by_org",
+          "description": "연도별·소속기관별 연간 에너지 사용량 합계(1. 백데이터 분석 시트의 2021~2024 행).",
+          "source_table": "raw_energy_all_years",
+          "source_mapping": {
+            "tables": [
+              "data_(백데이터)2021년",
+              "data_(백데이터)2022년",
+              "data_(백데이터)2023년",
+              "data_(백데이터)2024년"
+            ],
+            "year_column": "연도",
+            "org_column": "소속기관명",
+            "annual_usage_column": "연단위"
+          },
+          "group_by": ["year", "org_name"],
+          "filters": [],
+          "agg": {
+            "annual_usage_sum": "sum(연단위)"
+          },
+          "output_layout": {
+            "sheet_name": "1. 백데이터 분석",
+            "row_key": "year",
+            "col_key": "org_name",
+            "value": "annual_usage_sum",
+            "extra_columns": {
+              "합계": "row_sum(각 연도행의 모든 기관 annual_usage_sum)"
+            }
+          }
+        },
+
+        {
+          "name": "overall_current_year_usage",
+          "description": "기준연도(2024년) 공단 전체 에너지 사용량 합계.",
+          "source_table": "1. 백데이터 분석",
+          "group_by": [],
+          "filters": [
+            { "field": "연도", "op": "=", "value": 2024 }
+          ],
+          "agg": {
+            "current_year_total_usage": "sum(모든 기관별 연간 사용량)"
+          }
+        },
+
+        {
+          "name": "overall_yoy_and_3yr_change",
+          "description": "공단 전체 기준 전년대비 증감률, 3개년 평균 대비 증감률 계산.",
+          "source_table": "1. 백데이터 분석",
+          "group_by": [],
+          "filters": [],
+          "agg": {
+            "total_usage_by_year": "map(year -> sum(해당 연도 모든 기관 사용량))"
+          },
+          "derived_metrics": {
+            "current_year": 2024,
+            "prev_year": 2023,
+            "yoy_rate": "(total_usage[2024] - total_usage[2023]) / total_usage[2023]",
+            "avg_3yr_usage": "average(total_usage[2021], total_usage[2022], total_usage[2023])",
+            "vs_3yr_avg_rate": "(total_usage[2024] - avg_3yr_usage) / avg_3yr_usage"
+          }
+        },
+
+        {
+          "name": "overall_usage_by_facility_type",
+          "description": "의료/복지/기타 시설군 별 공단 전체 에너지 사용량 비중 및 면적 대비 사용률.",
+          "source_table": "raw_energy_all_years",
+          "group_by": ["facility_type"],
+          "filters": [
+            { "field": "year", "op": "=", "value": 2024 }
+          ],
+          "agg": {
+            "usage_sum": "sum(연단위)",
+            "area_sum": "sum(연면적)"
+          },
+          "derived_metrics": {
+            "usage_per_area": "usage_sum / area_sum",
+            "share_of_total": "usage_sum / sum_over_all_types(usage_sum)"
+          }
+        },
+
+        {
+          "name": "org_level_current_year_metrics",
+          "description": "소속기구별 연면적, 사용량, 면적대비 사용비율, 전체 사용 비중, 3개년 평균 대비 증감률, 시설별 평균 대비 비율 계산.",
+          "source_table": "raw_energy_all_years",
+          "group_by": ["org_name"],
+          "filters": [
+            { "field": "year", "op": "in", "value": [2022, 2023, 2024] }
+          ],
+          "agg": {
+            "current_year_usage": "sum(연단위 where year = 2024)",
+            "prev_year_usage": "sum(연단위 where year = 2023)",
+            "usage_2022": "sum(연단위 where year = 2022)",
+            "area": "max(연면적)",
+            "facility_type": "mode(시설구분)"
+          },
+          "derived_metrics": {
+            "avg_3yr_usage": "average(usage_2022, prev_year_usage, current_year_usage)",
+            "usage_per_area": "current_year_usage / area",
+            "usage_share": "current_year_usage / sum_over_all_org(current_year_usage)",
+            "vs_3yr_avg_rate": "(current_year_usage - avg_3yr_usage) / avg_3yr_usage"
+          }
+        },
+
+        {
+          "name": "overall_recommended_usage_by_ndc",
+          "description": "공단 전체 권장 에너지 사용량 및 감축률.",
+          "source_table": "overall_yoy_and_3yr_change",
+          "group_by": [],
+          "filters": [],
+          "agg": {
+            "current_year_total_usage": "carry_from(overall_current_year_usage.current_year_total_usage)",
+            "avg_3yr_usage": "carry_from(overall_yoy_and_3yr_change.avg_3yr_usage)"
+          },
+          "derived_metrics": {
+            "recommended_usage": "current_year_total_usage * (1 - ndc_target_rate)",
+            "reduction_rate_yoy": "-ndc_target_rate",
+            "reduction_rate_vs_3yr": "(recommended_usage - avg_3yr_usage) / avg_3yr_usage"
+          }
+        },
+
+        {
+          "name": "org_level_recommended_usage_and_flags",
+          "description": "소속기구별 권장 에너지 사용량, 권장 대비 실제 사용 비율 및 관리대상 여부.",
+          "source_table": "org_level_current_year_metrics",
+          "group_by": ["org_name"],
+          "filters": [],
+          "agg": {
+            "current_year_usage": "carry_from(org_level_current_year_metrics.current_year_usage)",
+            "avg_3yr_usage": "carry_from(org_level_current_year_metrics.avg_3yr_usage)",
+            "usage_per_area": "carry_from(org_level_current_year_metrics.usage_per_area)"
+          },
+          "derived_metrics": {
+            "recommended_usage": "current_year_usage * (1 - ndc_target_rate)",
+            "usage_vs_recommended": "current_year_usage / recommended_usage",
+            "rank_by_usage": "rank_desc(current_year_usage)",
+            "rank_by_3yr_growth": "rank_desc((current_year_usage - avg_3yr_usage) / avg_3yr_usage)",
+            "rank_by_usage_per_area": "rank_desc(usage_per_area)",
+            "management_flag": "usage_vs_recommended > 1 OR rank_by_usage_per_area in top_N"
+          }
+        }
+      ]
+    }
+  },
+
+  "output_templates": {
+    "data_1_raw_analysis": {
+      "name": "data_1. 백데이터 분석",
+      "description": "기존에 에너지 사용량 파일 업로드 아래에 그대로 출력되던 엑셀 서식. 연도별 × 소속기관별 연간 에너지 사용량 합계 및 합계열.",
+      "source_rule": "raw_annual_usage_by_org",
+      "layout": {
+        "sheet_title": "1. 백데이터 분석",
+        "row_axis": "year",
+        "row_labels": ["2021", "2022", "2023", "2024"],
+        "column_axis": "org_name",
+        "column_labels": [
+          "본사", "중앙보훈병원", "부산보훈병원",
+          "대전보훈병원", "광주보훈병원", "대구보훈병원",
+          "인천보훈병원", "요양원합계", "서울요양원",
+          "대전요양원", "광주요양원", "대구요양원",
+          "수원요양원", "전주요양원"
+        ],
+        "value_format": "energy_kwh_int",
+        "extra_columns": [
+          {
+            "name": "합계",
+            "source": "row_sum",
+            "format": "energy_kwh_int"
+          }
+        ]
+      }
+    },
+
+    "data_2_usage_analysis": {
+      "name": "data_2. 에너지 사용량 분석",
+      "description": "기존 '에너지 사용량 추이' 화면 아래에 출력되던 공단 전체 기준 및 소속기구별 분석 서식.",
+      "sections": {
+        "overall": {
+          "title": "1. 공단 전체기준",
+          "source_rules": [
+            "overall_current_year_usage",
+            "overall_yoy_and_3yr_change",
+            "overall_usage_by_facility_type"
+          ],
+          "layout": {
+            "row_labels": ["전 체"],
+            "columns": [
+              {
+                "name": "에너지 사용량(현재 기준)",
+                "source": "overall_current_year_usage.current_year_total_usage",
+                "format": "energy_kwh_int"
+              },
+              {
+                "name": "전년대비 증감률",
+                "source": "overall_yoy_and_3yr_change.yoy_rate",
+                "format": "percent_2"
+              },
+              {
+                "name": "3개년 평균 에너지 사용량 대비 증감률",
+                "source": "overall_yoy_and_3yr_change.vs_3yr_avg_rate",
+                "format": "percent_2"
+              },
+              {
+                "name": "의료시설",
+                "source": "overall_usage_by_facility_type.usage_per_area[시설구분=의료]",
+                "format": "ratio_2"
+              },
+              {
+                "name": "복지시설",
+                "source": "overall_usage_by_facility_type.usage_per_area[시설구분=복지]",
+                "format": "ratio_2"
+              },
+              {
+                "name": "기타시설",
+                "source": "overall_usage_by_facility_type.usage_per_area[시설구분=기타]",
+                "format": "ratio_2"
+              }
+            ]
+          }
+        },
+        "by_org": {
+          "title": "2. 소속기구별",
+          "source_rule": "org_level_current_year_metrics",
+          "layout": {
+            "row_axis": "org_name",
+            "columns": [
+              {
+                "name": "시설구분",
+                "source": "facility_type",
+                "format": "text_default"
+              },
+              {
+                "name": "연면적",
+                "source": "area",
+                "format": "area_m2_int"
+              },
+              {
+                "name": "에너지 사용량",
+                "source": "current_year_usage",
+                "format": "energy_kwh_int"
+              },
+              {
+                "name": "면적대비 에너지 사용비율",
+                "source": "usage_per_area",
+                "format": "ratio_2"
+              },
+              {
+                "name": "에너지 사용 비중",
+                "source": "usage_share",
+                "format": "percent_2"
+              },
+              {
+                "name": "3개년 평균 에너지 사용량 대비 증감률",
+                "source": "vs_3yr_avg_rate",
+                "format": "percent_2"
+              },
+              {
+                "name": "시설별 평균 면적 대비 에너지 사용비율",
+                "source": "usage_per_area_relative",
+                "format": "ratio_2"
+              }
+            ]
+          }
+        }
+      }
+    },
+
+    "data_3_feedback": {
+      "name": "data_3. 피드백",
+      "description": "기존 '에너지 사용량 추이' 화면 아래에 출력되던 공단 전체 및 소속기구별 에너지 사용량 피드백 서식.",
+      "sections": {
+        "overall": {
+          "title": "1. 공단 전체기준",
+          "source_rule": "overall_recommended_usage_by_ndc",
+          "layout": {
+            "row_labels": ["공단 전체"],
+            "columns": [
+              {
+                "name": "권장 에너지 사용량",
+                "source": "recommended_usage",
+                "format": "energy_kwh_int"
+              },
+              {
+                "name": "전년대비 감축률",
+                "source": "reduction_rate_yoy",
+                "format": "percent_2"
+              },
+              {
+                "name": "3개년 대비 감축률",
+                "source": "reduction_rate_vs_3yr",
+                "format": "percent_2"
+              }
+            ],
+            "notes": [
+              "온실가스감축목표(NDC) 연평균 감축률 4.17%를 기준으로 산정."
+            ]
+          }
+        },
+        "by_org": {
+          "title": "2. 소속기구별",
+          "source_rule": "org_level_recommended_usage_and_flags",
+          "layout": {
+            "row_axis": "org_name",
+            "columns": [
+              {
+                "name": "사용 분포 순위",
+                "source": "rank_by_usage",
+                "format": "rank_int"
+              },
+              {
+                "name": "에너지 3개년 평균 증가 순위",
+                "source": "rank_by_3yr_growth",
+                "format": "rank_int"
+              },
+              {
+                "name": "평균 에너지 사용량(연면적 기준) 순위",
+                "source": "rank_by_usage_per_area",
+                "format": "rank_int"
+              },
+              {
+                "name": "권장 에너지 사용량",
+                "source": "recommended_usage",
+                "format": "energy_kwh_int"
+              },
+              {
+                "name": "권장 사용량 대비 에너지 사용 비율",
+                "source": "usage_vs_recommended",
+                "format": "percent_2"
+              },
+              {
+                "name": "에너지 사용량 관리 대상",
+                "source": "management_flag",
+                "format": "text_default"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
