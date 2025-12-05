@@ -391,12 +391,17 @@ def render_upload_tab(
         try:
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
             df_raw_all = df_raw_all_tmp
-            # 디버그용: 행 수 간단 표시
+
+            # 🔹 이 두 줄: df_raw / year_to_raw 를 세션에 캐시
+            st.session_state["year_to_raw_cache"] = year_to_raw_tmp
+            st.session_state["df_raw_all_cache"] = df_raw_all_tmp
+
             st.info(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
             return
+
 
       # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
     if df_raw_all is None or df_raw_all.empty:
@@ -542,7 +547,14 @@ def main() -> None:
             )
             st.exception(e)
 
+    # 🔹 만약 방금 로딩에 실패해서 year_to_raw가 비어 있는데,
+    #    업로드 탭에서 만들어둔 캐시가 있다면 그걸 대신 사용
+    if (not year_to_raw) and "year_to_raw_cache" in st.session_state:
+        year_to_raw = st.session_state.get("year_to_raw_cache", {})
+        df_raw_all = st.session_state.get("df_raw_all_cache", df_raw_all)
+
     years_available = sorted(year_to_raw.keys())
+
 
     # -------------------------------------------------------
     # 2. 사이드바 필터
