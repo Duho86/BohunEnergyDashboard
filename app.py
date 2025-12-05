@@ -110,8 +110,6 @@ elif tab == "📊 대시보드":
     st.write("디버그 - 선택 연도:", target_year)
 
     overall = compute_overall_sheet2(target_year, year_to_raw)
-        def compute_overall_feedback(target_year: int, year_to_raw: dict):
-        st.write("[DEBUG] overall_feedback 호출 - target_year:", target_year, "keys:", list(year_to_raw.keys()))
     
     if overall is None:
         st.error("데이터 문제로 분석이 불가합니다.")
