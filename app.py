@@ -1,14 +1,17 @@
 import os
-import streamlit as st
-import pandas as pd
 
-from modules.loader import load_all_years
+import pandas as pd
+import streamlit as st
+
+from modules.loader import load_all_years, load_monthly_usage
 from modules.analyzer import (
     build_sheet1_tables,
     compute_overall_sheet2,
     compute_facility_sheet2,
     compute_overall_feedback,
     compute_facility_feedback,
+    generate_overall_comment,
+    generate_org_comments,
 )
 
 # ------------------------------------------------------------
@@ -114,7 +117,7 @@ elif tab == "📊 대시보드":
 
         org_list = sorted(df_target["기관명"].unique())
         selected_orgs = st.sidebar.multiselect(
-            "소속기구 선택",
+            "소속기구별 필터",
             options=org_list,
             default=org_list,
         )
@@ -127,7 +130,6 @@ elif tab == "📊 대시보드":
                 df_y = df_y[df_y["기관명"].isin(selected_orgs)]
             filtered_year_to_raw[y] = df_y
 
-        
         # ----------------------------------------------------
         # 상단: 에너지 사용량 추이 (레이아웃 유지)
         # ----------------------------------------------------
@@ -139,29 +141,12 @@ elif tab == "📊 대시보드":
         with col_trend1:
             st.subheader("월별 에너지 사용량 추이")
 
-            df_year = filtered_year_to_raw[target_year]
+            monthly_df = load_monthly_usage(UPLOAD_DIR, target_year, selected_orgs)
 
-            monthly_chart_drawn = False
-
-            # 월 정보가 '월' 컬럼에 있는 경우 (예: 1~12)
-            if "월" in df_year.columns:
-                monthly = (
-                    df_year.groupby("월")["U"].sum().reset_index().sort_values("월")
-                )
-                monthly = monthly.set_index("월")
-                st.line_chart(monthly)
-                monthly_chart_drawn = True
-            # '사용년월' 형태(예: 2024-01)인 경우
-            elif "사용년월" in df_year.columns:
-                tmp = df_year.copy()
-                tmp["월"] = tmp["사용년월"].astype(str).str[-2:].astype(int)
-                monthly = tmp.groupby("월")["U"].sum().reset_index().sort_values("월")
-                monthly = monthly.set_index("월")
-                st.line_chart(monthly)
-                monthly_chart_drawn = True
-
-            if not monthly_chart_drawn:
-                st.info("월별 사용량 추이를 계산할 수 있는 '월' 또는 '사용년월' 컬럼이 없습니다.")
+            if monthly_df is not None:
+                st.line_chart(monthly_df)
+            else:
+                st.info("월별 사용량 추이를 계산할 수 있는 컬럼이 원본 파일에 없습니다.")
 
         # (우) 연도별 에너지 사용량 추이 (최대 5개년)
         with col_trend2:
@@ -193,30 +178,19 @@ elif tab == "📊 대시보드":
                 st.error("공단 전체 기준 분석을 계산하지 못했습니다.")
             else:
                 df_overall = pd.DataFrame(
-                    {
-                        "항목": [
-                            "에너지 사용량(현재 기준, U 합계)",
-                            "전체 면적당 온실가스 배출량(V)",
-                            "3개년 평균 에너지 사용량 대비 증감률",
-                        ],
-                        "값": [
-                            overall["에너지사용량"],
-                            overall["전체면적당온실가스"],
-                            overall["3개년평균대비증감"],
-                        ],
-                    }
+                    [
+                        {
+                            "에너지 사용량(현재 기준)": overall["에너지사용량"],
+                            "전년 대비 증감률": overall["전년대비증감률"],
+                            "3개년 평균 대비 증감률": overall["3개년평균대비증감률"],
+                            "의료시설 평균W": overall["의료시설평균W"],
+                            "복지시설 평균W": overall["복지시설평균W"],
+                            "기타시설 평균W": overall["기타시설평균W"],
+                        }
+                    ],
+                    index=["공단 전체"],
                 )
                 st.dataframe(df_overall, use_container_width=True)
-
-                # 시설구분별 평균 W
-                st.markdown("#### 시설구분별 평균 에너지 사용량(W)")
-                df_w = pd.DataFrame(
-                    [
-                        {"시설구분": k, "평균W": v}
-                        for k, v in overall["시설구분평균W"].items()
-                    ]
-                )
-                st.dataframe(df_w, use_container_width=True)
 
         # (우) 소속기구별 분석
         with col2_2:
@@ -243,14 +217,14 @@ elif tab == "📊 대시보드":
             st.error("공단 전체 피드백을 계산하지 못했습니다.")
         else:
             df_fb_overall = pd.DataFrame(
-                {
-                    "항목": ["권장 에너지 사용량", "전년대비 감축률", "3개년 평균 대비 감축률"],
-                    "값": [
-                        fb_overall["권장사용량"],
-                        fb_overall["전년대비감축률"],
-                        fb_overall["3개년평균감축률"],
-                    ],
-                }
+                [
+                    {
+                        "권장 사용량": fb_overall["권장사용량"],
+                        "전년 대비 감축률": fb_overall["전년대비감축률"],
+                        "3개년 평균 대비 감축률": fb_overall["3개년평균감축률"],
+                    }
+                ],
+                index=["공단 전체"],
             )
             st.dataframe(df_fb_overall, use_container_width=True)
 
@@ -267,6 +241,17 @@ elif tab == "📊 대시보드":
 
             st.markdown("#### ② 관리대상(O/X) 상세")
             st.dataframe(fb_fac2, use_container_width=True)
+
+            # 서술형 코멘트
+            st.markdown("### 📝 AI 기반 요약 코멘트")
+
+            overall_comment = generate_overall_comment(target_year, overall, df_fac)
+            st.markdown(f"**공단 전체 요약**  \n{overall_comment}")
+
+            org_comments = generate_org_comments(fb_fac1, fb_fac2)
+            with st.expander("기관별 상세 코멘트 보기", expanded=False):
+                for txt in org_comments:
+                    st.markdown(f"- {txt}")
 
 
 # ============================================================
