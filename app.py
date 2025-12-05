@@ -42,7 +42,7 @@ if load_errors:
 
 
 # ------------------------------------------------------------
-# 📌 사이드바 필터 – 요청하신 레이아웃
+# 📌 사이드바 필터 – 요청 레이아웃/동작 반영
 # ------------------------------------------------------------
 with st.sidebar:
     st.markdown("### 필터")
@@ -59,7 +59,7 @@ with st.sidebar:
         selected_year = None
         st.selectbox("이행연도 선택", ["(데이터 없음)"], index=0)
 
-    # 3) 기관 선택 (기관별 선택 시에만)
+    # 3) 기관 선택 (기관별일 때만, 하나씩 선택)
     if selected_year is not None and year_to_raw:
         df_for_org = year_to_raw[selected_year]
         org_list = sorted(df_for_org["기관명"].astype(str).unique())
@@ -67,17 +67,17 @@ with st.sidebar:
         org_list = []
 
     if view_scope == "기관별":
-        # MultiSelect로 구현하지만, 기본은 하나만 선택된 상태라
-        # UI 상으로는 스샷과 비슷하게 동작
-        selected_orgs: List[str] = st.multiselect(
-            "기관 선택",
-            options=org_list,
-            default=org_list[:1] if org_list else [],
-        )
+        if org_list:
+            selected_org = st.selectbox("기관 선택", options=org_list)
+            selected_orgs: List[str] = [selected_org]
+        else:
+            st.info("선택 가능한 기관이 없습니다.")
+            selected_orgs = []
     else:
         # 공단 전체일 때는 모든 기관 사용
         selected_orgs = org_list
 
+    # 4) 에너지 종류 필터 (추후 확장용)
     st.markdown("### 에너지 종류 필터 (추후 확장용)")
     energy_type = st.selectbox(
         "에너지 종류",
@@ -88,7 +88,6 @@ with st.sidebar:
 
 # ------------------------------------------------------------
 # 상단 탭 메뉴 – 대시보드 / 업로드 / 디버그
-# (요청하신 것처럼 제목 아래에 가로 메뉴 배치)
 # ------------------------------------------------------------
 tab_dashboard, tab_upload, tab_debug = st.tabs(
     ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
@@ -102,7 +101,7 @@ with tab_dashboard:
     if not year_to_raw or selected_year is None:
         st.warning("⚠ 분석 가능한 연도 데이터가 없습니다. 먼저 파일을 업로드해 주세요.")
     else:
-        # 선택된 범위(공단 전체 / 특정 기관들)에 맞춰 df를 필터링한 year_to_raw 생성
+        # 선택된 범위(공단 전체 / 특정 기관) 에 맞춘 year_to_raw 생성
         filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
         for y, df in year_to_raw.items():
             df_y = df.copy()
@@ -110,11 +109,14 @@ with tab_dashboard:
                 df_y = df_y[df_y["기관명"].astype(str).isin(selected_orgs)]
             filtered_year_to_raw[y] = df_y
 
+        # -----------------------------
+        # 에너지 사용량 추이
+        # -----------------------------
         st.subheader("에너지 사용량 추이")
 
         col_trend1, col_trend2 = st.columns(2)
 
-        # (좌) 월별 에너지 사용량 추이
+        # (좌) 월별 에너지 사용량 추이 (선 그래프 유지)
         with col_trend1:
             st.markdown("##### 월별 에너지 사용량 추이")
             monthly_df = load_monthly_usage(UPLOAD_DIR, selected_year, selected_orgs)
@@ -124,7 +126,7 @@ with tab_dashboard:
             else:
                 st.info("월별 사용량 추이를 계산할 수 있는 컬럼이 원본 파일에 없습니다.")
 
-        # (우) 연도별 에너지 사용량 추이 (최대 5개년)
+        # (우) 연도별 에너지 사용량 추이 – ✅ 막대그래프
         with col_trend2:
             st.markdown("##### 연도별 에너지 사용량 추이 (최대 5개년)")
             years_sorted = sorted(filtered_year_to_raw.keys())
@@ -135,7 +137,7 @@ with tab_dashboard:
 
             if data_year:
                 df_trend_year = pd.DataFrame(data_year).set_index("연도")
-                st.line_chart(df_trend_year)
+                st.bar_chart(df_trend_year)  # ← line_chart → bar_chart 로 변경
             else:
                 st.info("연도별 에너지 사용량 추이를 계산할 수 있는 데이터가 없습니다.")
 
@@ -143,41 +145,37 @@ with tab_dashboard:
 
         # -----------------------------
         # 시트2: 에너지 사용량 분석
+        # ✅ 공단 전체 기준 & 소속기구별 분석을 위/아래로 전체 폭 사용
         # -----------------------------
         st.subheader("에너지 사용량 분석 (시트2)")
 
-        col2_1, col2_2 = st.columns([1.4, 2.0])
+        # (위) 공단 전체 기준
+        st.markdown("###### 📌 공단 전체 기준 (시트2 상단)")
+        overall = compute_overall_sheet2(selected_year, filtered_year_to_raw)
+        if overall is None:
+            st.error("공단 전체 기준 분석을 계산하지 못했습니다.")
+        else:
+            df_overall = pd.DataFrame(
+                [
+                    {
+                        "에너지 사용량(현재 기준)": overall["에너지사용량"],
+                        "전년 대비 증감률": overall["전년대비증감률"],
+                        "3개년 평균 대비 증감률": overall["3개년평균대비증감률"],
+                        "의료시설 평균W": overall["의료시설평균W"],
+                        "복지시설 평균W": overall["복지시설평균W"],
+                        "기타시설 평균W": overall["기타시설평균W"],
+                    }
+                ],
+                index=["공단 전체"],
+            )
+            st.dataframe(df_overall, use_container_width=True)
 
-        # (좌) 공단 전체 기준 (상단 표)
-        with col2_1:
-            st.markdown("###### 📌 공단 전체 기준 (시트2 상단)")
-            overall = compute_overall_sheet2(selected_year, filtered_year_to_raw)
-            if overall is None:
-                st.error("공단 전체 기준 분석을 계산하지 못했습니다.")
-            else:
-                df_overall = pd.DataFrame(
-                    [
-                        {
-                            "에너지 사용량(현재 기준)": overall["에너지사용량"],
-                            "전년 대비 증감률": overall["전년대비증감률"],
-                            "3개년 평균 대비 증감률": overall["3개년평균대비증감률"],
-                            "의료시설 평균W": overall["의료시설평균W"],
-                            "복지시설 평균W": overall["복지시설평균W"],
-                            "기타시설 평균W": overall["기타시설평균W"],
-                        }
-                    ],
-                    index=["공단 전체"],
-                )
-                st.dataframe(df_overall, use_container_width=True)
-
-        # (우) 소속기구별 분석 (하단 표)
-        with col2_2:
-            st.markdown("###### 🏢 소속기구별 분석 (시트2 하단)")
-            df_fac = compute_facility_sheet2(selected_year, filtered_year_to_raw)
-            if df_fac is None or df_fac.empty:
-                st.error("소속기구별 분석 표를 생성하지 못했습니다.")
-            else:
-                st.dataframe(df_fac, use_container_width=True)
+        st.markdown("###### 🏢 소속기구별 분석 (시트2 하단)")
+        df_fac = compute_facility_sheet2(selected_year, filtered_year_to_raw)
+        if df_fac is None or df_fac.empty:
+            st.error("소속기구별 분석 표를 생성하지 못했습니다.")
+        else:
+            st.dataframe(df_fac, use_container_width=True)
 
         st.divider()
 
@@ -230,33 +228,37 @@ with tab_dashboard:
 
 # ============================================================
 # 📂 (2) 에너지 사용량 파일 업로드 탭
+#    ✅ 업로드 UI / 저장된 파일 목록 좌우 분할
 # ============================================================
 with tab_upload:
     st.header("에너지 사용량 파일 업로드")
 
-    uploaded_files = st.file_uploader(
-        "《에너지 사용량관리.xlsx》 형식의 파일을 연도별로 업로드해 주세요.",
-        type=["xlsx"],
-        accept_multiple_files=True,
-    )
+    col_upload, col_files = st.columns(2)
 
-    if uploaded_files:
-        for f in uploaded_files:
-            save_path = os.path.join(UPLOAD_DIR, f.name)
-            with open(save_path, "wb") as out:
-                out.write(f.read())
-        st.success("파일 업로드 및 저장이 완료되었습니다. 화면을 새로고침하면 분석에 반영됩니다.")
-
-    # 저장된 파일 목록
-    st.subheader("저장된 파일 목록")
-    files = sorted([fn for fn in os.listdir(UPLOAD_DIR) if fn.lower().endswith(".xlsx")])
-    if not files:
-        st.info("아직 업로드된 파일이 없습니다.")
-    else:
-        df_files = pd.DataFrame(
-            [{"No": i + 1, "파일명": fn} for i, fn in enumerate(files)]
+    with col_upload:
+        uploaded_files = st.file_uploader(
+            "《에너지 사용량관리.xlsx》 형식의 파일을 연도별로 업로드해 주세요.",
+            type=["xlsx"],
+            accept_multiple_files=True,
         )
-        st.dataframe(df_files, use_container_width=True)
+
+        if uploaded_files:
+            for f in uploaded_files:
+                save_path = os.path.join(UPLOAD_DIR, f.name)
+                with open(save_path, "wb") as out:
+                    out.write(f.read())
+            st.success("파일 업로드 및 저장이 완료되었습니다. 화면을 새로고침하면 분석에 반영됩니다.")
+
+    with col_files:
+        st.subheader("저장된 파일 목록")
+        files = sorted([fn for fn in os.listdir(UPLOAD_DIR) if fn.lower().endswith(".xlsx")])
+        if not files:
+            st.info("아직 업로드된 파일이 없습니다.")
+        else:
+            df_files = pd.DataFrame(
+                [{"No": i + 1, "파일명": fn} for i, fn in enumerate(files)]
+            )
+            st.dataframe(df_files, use_container_width=True)
 
     st.divider()
     st.subheader("📘 백데이터 분석 (시트1 구조)")
@@ -281,6 +283,7 @@ with tab_upload:
 
 # ============================================================
 # 🔧 (3) 디버그 / 진단 탭
+#    ✅ df_raw 전체 출력
 # ============================================================
 with tab_debug:
     st.header("디버그 / 진단")
@@ -291,11 +294,12 @@ with tab_debug:
 
     if year_to_raw:
         dbg_year = st.selectbox(
-            "미리보기 연도 선택",
+            "df_raw 미리보기 연도 선택",
             options=sorted(year_to_raw.keys()),
         )
-        st.markdown("#### df_raw 미리보기")
-        st.dataframe(year_to_raw[dbg_year].head(), use_container_width=True)
+        st.markdown("#### df_raw 전체 데이터")
+        # ✅ head() 대신 전체 출력
+        st.dataframe(year_to_raw[dbg_year], use_container_width=True)
 
         st.markdown("#### df_raw 컬럼 목록")
         st.write(list(year_to_raw[dbg_year].columns))
