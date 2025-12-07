@@ -329,23 +329,23 @@ def render_dashboard_tab(
         else:
             data2_by_org = data2_by_org.iloc[0:0]
 
-DATA2_OVERALL_FMT = {
-    "에너지 사용량(현재 기준)": "energy_kwh_int",
-    "전년대비 증감률": "percent_2",
-    "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
-    "의료시설": "percent_2",
-    "복지시설": "percent_2",
-    "기타시설": "percent_2",
-}
-
-DATA2_BYORG_FMT = {   # ← 들여쓰기 제거!
-    "연면적": "area_m2_int",
-    "에너지 사용량": "energy_kwh_int",
-    "면적대비 에너지 사용비율": "percent_2",
-    "에너지 사용 비중": "percent_2",
-    "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
-    "시설별 평균 면적 대비 에너지 사용비율": "percent_2",
-}
+    DATA2_OVERALL_FMT = {
+        "에너지 사용량(현재 기준)": "energy_kwh_int",
+        "전년대비 증감률": "percent_2",
+        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
+        "의료시설": "percent_2",
+        "복지시설": "percent_2",
+        "기타시설": "percent_2",
+    }
+    
+    DATA2_BYORG_FMT = {
+        "연면적": "area_m2_int",
+        "에너지 사용량": "energy_kwh_int",
+        "면적대비 에너지 사용비율": "percent_2",
+        "에너지 사용 비중": "percent_2",
+        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
+        "시설별 평균 면적 대비 에너지 사용비율": "percent_2",
+    }
 
 
 
