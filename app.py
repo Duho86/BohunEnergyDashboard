@@ -157,6 +157,10 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     - use_abs=True: 음수 값 가능 지표는 절대값으로 비교 (예: 증감률)
     - 값이 모두 0/NaN 이면 안내만 출력
     """
+    if not ALT_AVAILABLE:
+        st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
+        return
+
     if series is None or series.empty:
         st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
@@ -183,15 +187,22 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
         top["기타"] = others
         s = top
 
-    labels = s.index.astype(str).tolist()
-    values = s.values
+    df = s.reset_index()
+    df.columns = ["기관명", "value"]
 
-    fig, ax = plt.subplots()
-    ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
-    ax.axis("equal")
-    ax.set_title(title)
-    st.pyplot(fig)
-    plt.close(fig)
+    chart = (
+        alt.Chart(df)
+        .mark_arc()
+        .encode(
+            theta="value:Q",
+            color="기관명:N",
+            tooltip=["기관명:N", "value:Q"],
+        )
+        .properties(title=title)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
 
 
 # ===========================================================
