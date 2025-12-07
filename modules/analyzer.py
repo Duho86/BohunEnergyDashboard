@@ -11,7 +11,7 @@ try:
 except ImportError:  # 테스트 환경용
     st = None  # type: ignore[assignment]
 
-from .loader import load_spec, get_org_order
+from .loader import load_spec, get_org_order  # get_org_order는 필요시 확장용
 
 
 # ======================================================================
@@ -57,6 +57,20 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
             continue
 
         tmp = df.copy()
+
+        # (A) 엑셀 합계행(기관명='합계' + 연면적/연단위 NaN) 미리 제거
+        if (
+            "기관명" in tmp.columns
+            and "연면적" in tmp.columns
+            and "연단위" in tmp.columns
+        ):
+            mask_total = (
+                tmp["기관명"].astype(str).str.strip().eq("합계")
+                & tmp["연면적"].isna()
+                & tmp["연단위"].isna()
+            )
+            if mask_total.any():
+                tmp = tmp.loc[~mask_total].copy()
 
         # 1) 필수 컬럼 존재 여부 확인
         for col in required_cols:
