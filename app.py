@@ -10,16 +10,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
-try:
-    import altair as alt
-    ALT_AVAILABLE = True
-except ImportError:
-    ALT_AVAILABLE = False
-
-
 # ===========================================================
-# 내부 모듈 import (오류 발생 시 화면에 표시)
+# 내부 모듈 import  (오류 발생 시 화면에 표시)
 # ===========================================================
 try:
     from modules.loader import (
@@ -146,74 +138,6 @@ def format_table(
         df_fmt[col] = df_fmt[col].apply(lambda x: format_number(x, rule))
 
     return df_fmt
-
-
-# ===========================================================
-# 원그래프(파이 차트) 유틸
-# ===========================================================
-def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False) -> None:
-    """기관별 값을 받아 원그래프(Altair)를 그린다.
-
-    - use_abs=True: 음수 가능 지표(증감률 등)에 절대값 적용
-    - 색상 팔레트: category20
-    - 기관명 정렬: value 내림차순(높은 값 → 낮은 값)
-    - 기타 그룹 없음: 모든 소속기구를 그대로 표시
-    """
-    if not ALT_AVAILABLE:
-        st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
-        return
-
-    if series is None or series.empty:
-        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
-        return
-
-    # NaN 제거
-    s = series.dropna()
-    if s.empty:
-        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
-        return
-
-    # 증감률 등 음수 가능 지표는 절대값으로 비교
-    if use_abs:
-        s = s.abs()
-
-    # 파이차트는 0/음수 불가 → 0 제거
-    s = s[s > 0]
-    if s.empty:
-        st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
-        return
-
-    # 값 큰 순으로 정렬 (높은 → 낮은)
-    s = s.sort_values(ascending=False)
-
-    # 🔴 더 이상 상위 10개 + 기타로 묶지 않음 → 전체 소속기구 그대로 사용
-    df = s.reset_index()
-    df.columns = ["기관명", "value"]
-
-    chart = (
-        alt.Chart(df)
-        .mark_arc()
-        .encode(
-            theta=alt.Theta(field="value", type="quantitative", stack=True),
-            color=alt.Color(
-                field="기관명",
-                type="nominal",
-                sort=alt.SortField(field="value", order="descending"),
-                scale=alt.Scale(scheme="category20"),
-            ),
-            tooltip=[
-                alt.Tooltip("기관명:N", title="기관명"),
-                alt.Tooltip("value:Q", title="값", format=",.1f"),
-            ],
-        )
-        .properties(title=title)
-    )
-
-    st.altair_chart(chart, use_container_width=True)
-
-
-
-
 
 
 # ===========================================================
@@ -405,7 +329,6 @@ def render_dashboard_tab(
         else:
             data2_by_org = data2_by_org.iloc[0:0]
 
-    # 포맷 규칙 매핑
     DATA2_OVERALL_FMT = {
         "에너지 사용량(현재 기준)": "energy_kwh_int",
         "전년대비 증감률": "percent_2",
@@ -414,6 +337,7 @@ def render_dashboard_tab(
         "복지시설": "percent_2",
         "기타시설": "percent_2",
     }
+    
     DATA2_BYORG_FMT = {
         "연면적": "area_m2_int",
         "에너지 사용량": "energy_kwh_int",
@@ -423,31 +347,13 @@ def render_dashboard_tab(
         "시설별 평균 면적 대비 에너지 사용비율": "percent_2",
     }
 
-    # 1) 공단 전체 기준(포맷 적용 전, 시설구분 컬럼 따로 분리)
-    fac_cols = ["의료시설", "복지시설", "기타시설"]
-    fac_overall = data2_overall[fac_cols].copy()
 
-    # 2) 시설구분별 표용 포맷
-    fac_overall_fmt = format_table(
-        fac_overall,
-        fmt_rules,
-        {col: "percent_2" for col in fac_cols},
-    )
-    fac_overall_fmt = fac_overall_fmt.T
-    fac_overall_fmt.columns = ["면적대비 에너지 사용비율"]
 
-    # 3) 공단 전체 기준 표 포맷 (시설구분 포함)
     df2_overall_fmt = format_table(
         data2_overall,
         fmt_rules,
         DATA2_OVERALL_FMT,
     )
-    # 4) 공단 전체 기준 표에서는 시설구분 3개 컬럼 제거
-    for col in fac_cols:
-        if col in df2_overall_fmt.columns:
-            df2_overall_fmt = df2_overall_fmt.drop(columns=[col])
-
-    # 5) 소속기구별 표 포맷
     df2_by_org_fmt = format_table(
         data2_by_org,
         fmt_rules,
@@ -465,42 +371,14 @@ def render_dashboard_tab(
 
     with col2:
         st.markdown("**시설구분별 면적대비 평균 에너지 사용비율**")
-        if fac_overall_fmt is not None and not fac_overall_fmt.empty:
-            st.dataframe(fac_overall_fmt, use_container_width=True)
+        fac_cols = ["의료시설", "복지시설", "기타시설"]
+        fac_cols = [c for c in fac_cols if c in df2_overall_fmt.columns]
+        if fac_cols:
+            fac_df = df2_overall_fmt[fac_cols].T
+            fac_df.columns = ["면적대비 에너지 사용비율"]
+            st.dataframe(fac_df, use_container_width=True)
         else:
             st.info("시설구분별 데이터가 없습니다.")
-
-    st.markdown("---")
-
-    # -------------------------------------------------------
-    # 1-1. 소속기구별 분석 원그래프 (에너지 분석 부문)
-    # -------------------------------------------------------
-    st.markdown("**소속기구별 원그래프 (에너지 분석 부문)**")
-
-    if data2_by_org is None or data2_by_org.empty or len(data2_by_org.index) < 2:
-        st.info("소속기구별 비교를 위한 데이터가 2개 미만입니다.")
-    else:
-        pie_metrics = [
-            ("에너지 사용량", "에너지 사용량", False),
-            ("면적대비 에너지 사용비율", "면적대비 에너지 사용비율", False),
-            ("에너지 사용 비중", "에너지 사용 비중", False),
-            ("3개년 평균 에너지 사용량 대비 증감률", "3개년 평균 에너지 사용량 대비 증감률", True),
-            ("시설별 평균 면적 대비 에너지 사용비율", "시설별 평균 면적 대비 에너지 사용비율", False),
-        ]
-
-        # 2개씩 좌우 분할
-        for i in range(0, len(pie_metrics), 2):
-            cols = st.columns(2)
-            for j in range(2):
-                if i + j >= len(pie_metrics):
-                    break
-                title_kor, col_name, use_abs = pie_metrics[i + j]
-                with cols[j]:
-                    if col_name in data2_by_org.columns:
-                        series = data2_by_org[col_name]
-                        render_pie_from_series(series, title_kor, use_abs=use_abs)
-                    else:
-                        st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
     st.markdown("---")
     st.markdown("**2. 소속기구별 분석**")
@@ -528,8 +406,56 @@ def render_dashboard_tab(
     }
     DATA3_BYORG_FMT = {
         "권장 에너지 사용량": "energy_kwh_int",
+        # 🔴 권장 사용량 대비 에너지 사용 비율 → percent_2
         "권장 사용량 대비 에너지 사용 비율": "percent_2",
     }
+
+
+    # 2-0. 서술형 피드백 블록
+    try:
+        overall_row = data3.overall.iloc[0]
+        rec_usage = float(overall_row.get("권장 에너지 사용량", np.nan))
+        red_yoy = float(overall_row.get("전년대비 감축률", np.nan))
+        red_vs3 = float(overall_row.get("3개년 대비 감축률", np.nan))
+
+        df_detail_tmp = data3.detail.copy()
+        risk_mask = (df_detail_tmp == "O").any(axis=1)
+        risk_orgs = df_detail_tmp.index[risk_mask].tolist()
+
+        parts: list[str] = []
+        if not np.isnan(rec_usage):
+            parts.append(
+                f"{selected_year}년 권장 에너지 사용량은 약 {rec_usage:,.0f}입니다."
+            )
+        if not np.isnan(red_yoy):
+            parts.append(
+                f"전년 대비 목표 감축률은 {red_yoy * 100:.1f}% 수준입니다."
+            )
+        if not np.isnan(red_vs3):
+            parts.append(
+                f"최근 3개년 평균 대비로는 {red_vs3 * 100:.1f}% 수준의 감축 목표가 설정되어 있습니다."
+            )
+        if risk_orgs:
+            parts.append(
+                "관리대상으로 분류된 기관: " + ", ".join(risk_orgs)
+            )
+
+        comment_text = (
+            " ".join(parts) if parts else "피드백을 생성할 수 있는 데이터가 충분하지 않습니다."
+        )
+
+        st.markdown(
+            f"""
+<div style="padding:0.75rem 1rem; background-color:#444444; border-radius:0.5rem; margin-bottom:0.75rem;">
+  <strong>서술형 피드백</strong><br/>
+  {comment_text}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        # 서술형 피드백 블록 실패 시, 표 출력은 계속 진행
+        pass
 
     # 2-1. 표 포맷팅 및 기관별 필터
     df3_overall_fmt = format_table(
@@ -540,8 +466,6 @@ def render_dashboard_tab(
 
     df3_by_org = data3.by_org.copy()
     df3_detail = data3.detail.copy()
-
-    org_order = list(get_org_order())
 
     if view_mode == "공단 전체":
         df3_by_org = df3_by_org.reindex(org_order)
@@ -564,41 +488,9 @@ def render_dashboard_tab(
 
     st.markdown("**1. 공단 전체 기준**")
     st.dataframe(df3_overall_fmt, use_container_width=True)
-    st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
-
 
     st.markdown("---")
     st.markdown("**2. 소속기구별**")
-
-    # -------------------------------------------------------
-    # 2-1. 사용 분포 순위 원그래프 (에너지 3개년 평균 증가 순위 / 평균 에너지 사용량(연면적 기준) 순위)
-    # -------------------------------------------------------
-    if df3_by_org is None or df3_by_org.empty or len(df3_by_org.index) < 2:
-        st.info("순위 비교를 위한 데이터가 2개 미만입니다.")
-    else:
-        st.markdown("**소속기구별 원그래프 (사용 분포 순위)**")
-
-        rank_metrics = [
-            ("에너지 3개년 평균 증가 순위", "에너지 3개년 평균 증가 순위"),
-            ("평균 에너지 사용량(연면적 기준) 순위", "평균 에너지 사용량(연면적 기준) 순위"),
-        ]
-
-        cols = st.columns(2)
-        for idx, (title_kor, col_name) in enumerate(rank_metrics):
-            with cols[idx]:
-                if col_name in df3_by_org.columns:
-                    rank_series = df3_by_org[col_name].dropna()
-                    if rank_series.empty:
-                        st.info(f"'{col_name}' 데이터가 없습니다.")
-                    else:
-                        # 순위는 숫자가 작을수록 상위이므로,
-                        # (최대+1-순위)로 점수를 만들어 파이 비중에 사용
-                        max_rank = rank_series.max()
-                        score = (max_rank + 1) - rank_series
-                        render_pie_from_series(score, title_kor, use_abs=False)
-                else:
-                    st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
-
     st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
@@ -608,65 +500,6 @@ def render_dashboard_tab(
         st.info("관리 대상 상세 데이터를 생성할 수 없습니다. (데이터 부족 또는 분석 오류)")
     else:
         st.dataframe(df3_detail, use_container_width=True)
-
-    # -------------------------------------------------------
-    # 3. AI 제안 피드백 (맨 아래 배치)
-    # -------------------------------------------------------
-    st.markdown("---")
-    st.subheader("AI 제안 피드백")
-
-    # (1) 종합분석 텍스트 생성 (기존 서술형 내용)
-    try:
-        overall_row = data3.overall.iloc[0]
-        rec_usage = float(overall_row.get("권장 에너지 사용량", np.nan))
-        red_yoy = float(overall_row.get("전년대비 감축률", np.nan))
-        red_vs3 = float(overall_row.get("3개년 대비 감축률", np.nan))
-
-        df_detail_tmp = data3.detail.copy()
-        risk_mask = (df_detail_tmp == "O").any(axis=1)
-        risk_orgs = df_detail_tmp.index[risk_mask].tolist()
-
-        comment_parts: list[str] = []
-        if not np.isnan(rec_usage):
-            comment_parts.append(
-                f"{selected_year}년 권장 에너지 사용량은 약 {rec_usage:,.0f}kWh 입니다."
-            )
-        if not np.isnan(red_yoy):
-            comment_parts.append(
-                f"전년 대비 감축 목표는 {red_yoy * 100:.1f}% 수준입니다."
-            )
-        if not np.isnan(red_vs3):
-            comment_parts.append(
-                f"최근 3개년 평균 대비 감축 목표는 {red_vs3 * 100:.1f}% 수준입니다."
-            )
-        if risk_orgs:
-            comment_parts.append("관리대상으로 분류된 기관: " + ", ".join(risk_orgs))
-
-        if comment_parts:
-            summary_text = "\n".join(f"* {t}" for t in comment_parts)
-        else:
-            summary_text = "* 피드백을 생성할 수 있는 데이터가 부족합니다."
-    except Exception:
-        summary_text = "* 종합분석 정보를 불러오는 중 오류가 발생했습니다."
-
-    # (2) 에너지 절감을 위한 제안 (고정 텍스트 – GPT 판단 기반 템플릿)
-    ai_suggestion = "\n".join(
-        [
-            "* 옥상·외벽 등 주요 외피의 단열 성능을 점검하고, 필요 시 단계적으로 보완하여 난방·냉방 부하를 줄입니다.",
-            "* 중앙보훈병원, 요양원 등 상시 가동 시설에는 온도·조도·점등을 자동 제어하는 BEMS(건물에너지관리시스템) 도입·확대를 검토합니다.",
-            "* 야간·휴일 비상설비 및 대기전력(PC, 복합기, 냉장고 등)을 집중 관리하는 ‘대기전력 차단 캠페인’을 시행합니다.",
-            "* 에너지 사용량이 빠르게 증가한 기관을 대상으로 원인 진단(증축, 장비 교체, 운영시간 변경 등)을 실시하고, 기관별 맞춤 절감 목표를 재설정합니다.",
-            "* 노후 보일러·냉동기·조명 등 에너지 다소비 설비는 고효율 인증 제품으로 교체하는 중장기 투자계획을 수립합니다.",
-            "* 직원 참여형 에너지 절감 프로그램(부서별 절감 실적 공개, 인센티브 부여 등)을 운영하여 자발적 참여를 유도합니다.",
-        ]
-    )
-
-    st.markdown("**(종합분석)**")
-    st.markdown(summary_text)
-
-    st.markdown("")
-    st.markdown("**(에너지 절감을 위한 제안)**")
-    st.markdown(ai_suggestion)
 
 
 # ===========================================================
@@ -681,7 +514,7 @@ def render_upload_tab(
 
     st.write(
         "- 연도별 《에너지 사용량관리.xlsx》 파일을 업로드하면, "
-        "df_raw(연단위 기준)로 변환하여 분석에 사용합니다."
+        "df_raw(U/V/W 기반이 아닌 연단위 기준)로 변환하여 분석에 사용합니다."
     )
 
     # 1) 파일 업로드 위젯
@@ -821,11 +654,11 @@ def render_debug_tab(
 # ===========================================================
 def main() -> None:
     st.set_page_config(
-        page_title="보훈공단 에너지 사용량 관리 대시보드",
+        page_title="공단 에너지 사용량·온실가스 관리 대시보드",
         layout="wide",
     )
 
-    st.title("보훈공단 에너지 사용량 관리 대시보드")
+    st.title("공단 에너지 사용량·온실가스 관리 대시보드")
 
     # -------------------------------------------------------
     # 0. spec 로딩
@@ -838,36 +671,31 @@ def main() -> None:
 
     fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
 
-        # -------------------------------------------------------
-    # 1. 에너지 사용량 파일 로딩 (캐시 + 실제 파일 동기화)
+    # -------------------------------------------------------
+    # 1. 에너지 사용량 파일 로딩 (캐시 우선)
     # -------------------------------------------------------
     year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
         "year_to_raw_cache", {}
     )
-    df_raw_all: Optional[pd.DataFrame] = st.session_state.get("df_raw_all_cache")
+    df_raw_all: Optional[pd.DataFrame] = st.session_state.get(
+        "df_raw_all_cache"
+    )
 
-    # 현재 인식된 파일 목록
-    year_to_file = get_year_to_file()
+    if not year_to_raw:
+        year_to_file = get_year_to_file()
+        if year_to_file:
+            try:
+                year_to_raw, df_raw_all = load_energy_files(year_to_file)
+                st.session_state["year_to_raw_cache"] = year_to_raw
+                st.session_state["df_raw_all_cache"] = df_raw_all
+            except Exception as e:
+                st.warning(
+                    "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
+                    "업로드 탭에서 파일을 다시 확인해 주세요."
+                )
+                st.exception(e)
 
-    # 🔹 파일은 있는데 캐시가 없거나(df_raw_all 이 None/empty) 하면 강제 재로딩
-    if year_to_file and (not year_to_raw or df_raw_all is None or df_raw_all.empty):
-        try:
-            year_to_raw, df_raw_all = load_energy_files(year_to_file)
-            st.session_state["year_to_raw_cache"] = year_to_raw
-            st.session_state["df_raw_all_cache"] = df_raw_all
-        except Exception as e:
-            st.warning(
-                "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
-                "업로드 탭에서 파일 목록과 형식을 다시 확인해 주세요."
-            )
-            st.exception(e)
-            year_to_raw = {}
-            df_raw_all = None
-    elif not year_to_file:
-        # 파일 자체가 없으면 캐시도 비움
-        year_to_raw = {}
-        df_raw_all = None
-
+    years_available = sorted(year_to_raw.keys())
 
     # -------------------------------------------------------
     # 2. 사이드바 필터
