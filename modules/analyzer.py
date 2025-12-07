@@ -146,25 +146,30 @@ def _compute_overall_usage(
 
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
-    시설구분별 면적대비 평균 에너지 사용비율 계산.
+    시설구분별 '면적대비 에너지 사용비율' 평균 계산.
 
-    엑셀과 최대한 맞추기 위해, df_raw에서 바로 비율을 내지 않고
-    '소속기구별 분석'과 같은 방식으로
-      - 기관별 (에너지 사용량 / 연면적)
-    을 먼저 구한 뒤, 그 값을 시설구분별로 단순 평균한다.
+    기존 코드는 시설구분별 (연단위 합계 / 연면적 합계)로 계산해서
+    기관별 비율을 다시 평균낸 엑셀(AAVERAGEIFS)과 차이가 났다.
+
+    여기서는:
+      1) 기관별 면적대비 비율 = 에너지 사용량 / 연면적
+      2) 시설구분별로 해당 기관들의 비율을 단순 평균
+    으로 계산해서 엑셀의
+      =AVERAGEIFS(소속기구별!E열, 소속기구별!B열, 시설구분)
+    과 최대한 맞춘다.
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
         raise ValueError(f"{current_year}년 데이터가 없습니다.")
 
-    # 기관별 사용량, 연면적, 시설구분
+    # 1) 기관별 연단위 합계 / 연면적 최대값 / 시설구분(대표값)
     usage_by_org = df_year.groupby("기관명", dropna=False)["연단위"].sum()
     area_by_org = df_year.groupby("기관명", dropna=False)["연면적"].max()
     fac_by_org = df_year.groupby("기관명", dropna=False)["시설구분"].agg(
         lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
     )
 
-    # 사용량 또는 면적이 0/NaN 인 기관은 제외
+    # 2) 사용량 또는 면적이 0/NaN 인 기관 제외
     valid = (usage_by_org > 0) & (area_by_org > 0)
     usage_by_org = usage_by_org[valid]
     area_by_org = area_by_org[valid]
@@ -173,7 +178,7 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
     if usage_by_org.empty:
         raise ValueError("시설구분별 면적대비 사용비율을 계산할 유효한 기관 데이터가 없습니다.")
 
-    # 기관별 면적대비 사용비율 (에너지 사용량 / 연면적)
+    # 3) 기관별 면적대비 사용비율 = 에너지 사용량 / 연면적
     upa_org = usage_by_org / area_by_org
 
     df_fac = pd.DataFrame(
@@ -183,7 +188,7 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
         }
     )
 
-    # 시설구분별 '기관별 비율'의 단순 평균
+    # 4) 시설구분별로 '기관별 비율'을 단순 평균
     grp = df_fac.groupby("시설구분", dropna=False)["면적대비 에너지 사용비율"].mean()
 
     def get_value(ftype: str) -> float:
@@ -198,6 +203,7 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
             "기타시설": get_value("기타시설"),
         }
     )
+
 
 
 
@@ -264,9 +270,12 @@ def _compute_org_level_current_metrics(
         current_year, pd.Series(0.0, index=usage_by_year_org.index)
     )
 
-    # current_year 이전 연도 중 마지막 3개년의 평균
-    # → 엑셀 '1. 백데이터 분석'!B24 (3개년 평균 에너지 사용량)에 가깝게 맞춤
+    # 🔹 current_year 기준 '직전 3개년' 평균 (예: 2024 → 2021, 2022, 2023)
     years_sorted = sorted(usage_by_year_org.columns)
+    if current_year not in years_sorted:
+        # 그래도 뭔가 나오게: 직전 3개년은 years_filter 기준으로 판단
+        years_sorted = sorted(years_filter)
+
     prev_years = [y for y in years_sorted if y < current_year]
     three_years = prev_years[-3:]
     if not three_years:
@@ -357,7 +366,7 @@ def _compute_overall_feedback(
 
     엑셀과 최대한 맞추기 위해,
       - 권장 에너지 사용량: 공단 전체 3개년 평균 × (1 - NDC)
-      - 전년대비 감축률: -NDC
+      - 전년대비 감축률: -NDC (목표치)
       - 3개년 대비 감축률: (권장 - 3개년 평균) / 3개년 평균
     으로 정의한다.
     """
@@ -370,22 +379,22 @@ def _compute_overall_feedback(
     if total_by_year.isna().any():
         raise ValueError("연도별 연단위 합계 계산 중 NaN 이 발생했습니다.")
 
-    # current_year 이전 연도 중 마지막 3개년
+    # current_year 이전 연도 중 마지막 3개년 (예: 2021,2022,2023)
     past_years = [y for y in analysis_years if y < current_year]
     three_years = past_years[-3:]
     if not three_years:
         raise ValueError("3개년 평균을 계산할 과거 연도가 충분하지 않습니다.")
 
-    # 공단 전체 3개년 평균 (엑셀 '1. 백데이터 분석'!U7 에 해당)
+    # 공단 전체 3개년 평균
     avg3 = float(total_by_year.loc[three_years].mean())
 
-    # 공단 전체 권장 사용량 = 3개년 평균 × (1 - NDC)
+    # 🔹 권장 에너지 사용량 = 3개년 평균 × (1 - NDC)
     recommended = avg3 * (1.0 - ndc_rate)
 
-    # 전년대비 감축률은 정책상 목표(NDC)를 그대로 사용
+    # 전년대비 감축률: 정책상 목표치 그대로 사용
     reduction_yoy = -ndc_rate
 
-    # 3개년 대비 감축률 = 3개년 평균 대비 권장량 변화율
+    # 3개년 대비 감축률 = (권장 - 3개년 평균) / 3개년 평균
     reduction_vs3 = (recommended - avg3) / avg3
 
     return pd.Series(
@@ -395,6 +404,7 @@ def _compute_overall_feedback(
             "3개년 대비 감축률": reduction_vs3,
         }
     )
+
 
 
 
@@ -420,7 +430,7 @@ def _compute_org_recommended_and_flags(
     # avg3 값을 역산: (cur - avg3) / avg3 = r → cur = avg3 * (1 + r)
     avg3 = cur_usage / (1.0 + vs3_rate.replace(-1.0, np.nan))
 
-    # ✅ 기관별 권장 사용량 = 3개년 평균 × (1 - NDC)
+    # 🔹 기관별 권장 사용량 = 3개년 평균 × (1 - NDC)
     recommended = avg3 * (1.0 - ndc_rate)
     usage_vs_recommended = cur_usage / recommended.replace(0, np.nan)
 
@@ -444,7 +454,7 @@ def _compute_org_recommended_and_flags(
     rank_by_growth_val = rank_by_growth.fillna(0.0)
     rank_by_upa_val = rank_by_upa.fillna(0.0)
 
-    # 전체 평균값 (엑셀의 합계행 기준과 유사하게 사용)
+    # 전체 평균값 (엑셀의 합계행 기준과 유사)
     upa_mean = upa.mean()
     growth_mean = growth_rate.mean()
     uv_mean = usage_vs_recommended.mean()
@@ -485,6 +495,7 @@ def _compute_org_recommended_and_flags(
         df_detail[col_name] = cond_bool.map(lambda x: "O" if x else "X")
 
     return df_by_org, df_detail
+
 
 
 
