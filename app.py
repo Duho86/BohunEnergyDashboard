@@ -1,660 +1,624 @@
-# app.py
-
-from __future__ import annotations
-
-import re
-from pathlib import Path
-from typing import Dict, Mapping, Optional
-
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+from typing import Dict, List
 
-# ===========================================================
-# 내부 모듈 import  (오류 발생 시 화면에 표시)
-# ===========================================================
-try:
-    from modules.loader import (
-        load_spec,
-        load_energy_files,
-        get_org_order,
-    )
-    from modules.analyzer import (
-        build_data_2_usage_analysis,
-        build_data_3_feedback,
-    )
-except Exception as e:
-    st.error("내부 모듈 import 오류가 발생했습니다.")
-    st.exception(e)
-    st.stop()
+# ============================================================
+# 0. 기본 설정
+# ============================================================
 
-# ===========================================================
-# 경로
-# ===========================================================
-PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
+st.set_page_config(
+    page_title="공단 에너지 사용량 분석",
+    layout="wide",
+)
 
-def log_error(msg: str) -> None:
-    st.error(msg)
+st.title("공단 에너지 사용량 분석 대시보드")
 
-def log_warning(msg: str) -> None:
-    st.warning(msg)
+# ============================================================
+# 1. 데이터 로딩 관련 유틸
+# ============================================================
 
-# ===========================================================
-# 파일명에서 연도 추출
-# ===========================================================
-def infer_year_from_filename(name: str) -> Optional[int]:
-    m = re.search(r"(20[0-9]{2})", name)
-    if not m:
-        return None
-    year = int(m.group(1))
-    return year if 2000 <= year <= 2100 else None
-
-
-# ===========================================================
-# data/ 폴더 검색 (로컬 자동 인식)
-# ===========================================================
-def discover_local_energy_files() -> Dict[int, Path]:
-    mapping: Dict[int, Path] = {}
-    if not DATA_DIR.is_dir():
-        return mapping
-
-    for p in DATA_DIR.glob("*.xlsx"):
-        y = infer_year_from_filename(p.name)
-        if y:
-            mapping.setdefault(y, p)
-
-    return mapping
-
-
-# ===========================================================
-# 세션 + 로컬 파일 병합
-# ===========================================================
-def get_year_to_file() -> Dict[int, object]:
-    local = discover_local_energy_files()
-    session = st.session_state.get("year_to_file", {})
-
-    merged: Dict[int, object] = {}
-    merged.update(local)
-    merged.update(session)
-    return merged
-
-# ===========================================================
-# 숫자 포맷팅 (master_energy_spec.formatting_rules 기반)
-# ===========================================================
-def format_number(value, rule: Mapping) -> str:
+@st.cache_data
+def load_raw_from_excel(uploaded_file: bytes, year: int) -> pd.DataFrame:
     """
-    - 천단위 구분기호
-    - 소수점 자리수
-    - ×100 후 % 등 suffix
+    백데이터 엑셀(또는 CSV/JSON)을 그대로 읽어와서
+    연도별 df_raw 형태로 통일한다.
+
+    반드시 포함되어야 하는 컬럼(이름은 엑셀과 맞추면 됨):
+    - '사업군'          : 본사 / 의료 / 복지 / 기타 등
+    - '소속기관명'      : 본사, 중앙보훈병원, 부산보훈병원 ...
+    - '연면적/설비용량' : 숫자(연면적)
+    - '연단위'          : 연간 에너지 사용량 (kWh 또는 환산값)
+    - (선택) '연료', '단위'  : 상세용
     """
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "-"
+    # 엑셀/CSV 구분해서 처리 (여기서는 엑셀 기준)
+    df = pd.read_excel(uploaded_file)
 
-    try:
-        v = float(value)
-    except Exception:
-        return str(value)
+    # 컬럼 표준화 (필요하면 여기 이름만 바꾸면 됨)
+    rename_map = {
+        "연면적/설비용량": "연면적",
+        "소속기구명": "소속기관명",  # 이미 소속기관명으로 되어 있으면 무시됨
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # ×100
-    if rule.get("multiply_by_100", False):
-        v *= 100
+    # 숫자 컬럼 정리
+    for col in ["연면적", "연단위"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    decimals = rule.get("decimal_places", 0)
-    thousands = rule.get("thousands_separator", False)
-    suffix = rule.get("suffix", "")
+    # 연도 컬럼 추가
+    df["기준연도"] = year
 
-    fmt = f"{{:,.{decimals}f}}" if thousands else f"{{:.{decimals}f}}"
-    result = fmt.format(v)
-
-    if suffix:
-        result += suffix
-
-    return result
+    return df
 
 
-# ===========================================================
-# DataFrame 포맷팅 적용
-# ===========================================================
-def format_table(df: pd.DataFrame,
-                 fmt_rules: Mapping[str, Mapping],
-                 column_fmt_map: Mapping[str, str],
-                 default_fmt_name: Optional[str] = None) -> pd.DataFrame:
+def concat_years(dfs_by_year: Dict[int, pd.DataFrame]) -> pd.DataFrame:
+    """여러 연도의 df_raw를 하나로 합친다."""
+    valid = [df.assign(기준연도=year) for year, df in dfs_by_year.items() if df is not None]
+    if not valid:
+        return pd.DataFrame()
+    return pd.concat(valid, ignore_index=True)
 
-    if df is None or df.empty:
-        return df
 
-    df_fmt = df.copy()
-
-    for col in df_fmt.columns:
-        fmt_name = column_fmt_map.get(col, default_fmt_name)
-        if not fmt_name:
-            continue
-        rule = fmt_rules.get(fmt_name)
-        if not rule:
-            continue
-        df_fmt[col] = df_fmt[col].apply(lambda x: format_number(x, rule))
-
-    return df_fmt
-
-# ===========================================================
-# data_1 (업로드 탭용) 테이블 생성
-# ===========================================================
-def build_data1_tables(df_raw_all: pd.DataFrame):
+def add_classification_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    업로드 탭에서 사용하는 3개 표:
-      1) 연도×기관 에너지 사용량(연단위)
-      2) 연도×기관 연면적
-      3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
+    원본 df_raw에 분석에 필요한 파생 컬럼들을 추가.
+
+    - 시설구분_대분류 : 사업군 -> 의료시설/복지시설/기타시설 매핑
+    - 기관 레벨 집계 등에 사용할 기본 컬럼 정리
     """
-    df = df_raw_all.copy()
+    df = df.copy()
 
-    years = sorted(df["연도"].unique())
-    org_order = list(get_org_order())
+    # 사업군 기준으로 시설 대분류 생성
+    def map_business_to_type(x: str) -> str:
+        if pd.isna(x):
+            return "기타시설"
+        x = str(x)
+        if "의료" in x:
+            return "의료시설"
+        if "복지" in x:
+            return "복지시설"
+        # 본사/교육원/요양원 등 나머지
+        return "기타시설"
 
-    # 1) 연도×기관 에너지 사용량 (연단위)
-    usage = (
-        df.pivot_table(
-            index="연도",
-            columns="기관명",
-            values="연단위",      # <- U/V/W 합계 아님. loader에서 제공한 연단위 값 그대로 사용
-            aggfunc="sum",
-            fill_value=0,
+    df["시설구분_대분류"] = df.get("시설구분_대분류")  # 있을 수도 있으니
+    if "시설구분_대분류" not in df.columns or df["시설구분_대분류"].isna().all():
+        df["시설구분_대분류"] = df["사업군"].apply(map_business_to_type)
+
+    # 연면적/연단위 숫자화
+    for col in ["연면적", "연단위"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
+# ============================================================
+# 2. 분석 계산 로직 (엑셀 수식 1:1 복원)
+# ============================================================
+
+def compute_org_level_table(
+    all_data: pd.DataFrame,
+    base_year: int,
+) -> pd.DataFrame:
+    """
+    2. 소속기구별 표를 만드는 함수.
+    - all_data : 여러 연도가 합쳐진 df_raw (기준연도 컬럼 포함)
+    - base_year: 기준연도 (예: 2024)
+
+    엑셀 '에너지 사용량 분석' 시트의 2번 표와 동일한 결과를 만든다.
+    """
+
+    if all_data.empty:
+        return pd.DataFrame()
+
+    df = add_classification_columns(all_data)
+
+    # 현재 연도 / 전년 / 과거 3개년 데이터 분리
+    df_cur = df[df["기준연도"] == base_year].copy()
+    df_prev = df[df["기준연도"] == base_year - 1].copy()
+    df_3y = df[df["기준연도"].between(base_year - 3, base_year - 1)].copy()
+
+    if df_cur.empty:
+        return pd.DataFrame()
+
+    # 기관별 집계 (연료별 row들을 기관별로 합침)
+    def agg_per_org(d: pd.DataFrame) -> pd.DataFrame:
+        g = (
+            d.groupby("소속기관명", dropna=False)
+            .apply(
+                lambda g_: pd.Series(
+                    {
+                        "시설구분": g_["시설구분_대분류"].dropna().iloc[0]
+                        if not g_["시설구분_대분류"].dropna().empty
+                        else "기타시설",
+                        "연면적": g_["연면적"].dropna().iloc[0]
+                        if not g_["연면적"].dropna().empty
+                        else np.nan,
+                        "에너지사용량": g_["연단위"].sum(),
+                    }
+                )
+            )
+            .reset_index()
         )
-        .reindex(index=years)
-        .reindex(columns=org_order)
-    )
-    usage["합계"] = usage.sum(axis=1)
+        return g
 
-    # 2) 연도×기관 연면적
-    area = (
-        df.pivot_table(
-            index="연도",
-            columns="기관명",
-            values="연면적",
-            aggfunc="max",
-            fill_value=0,
-        )
-        .reindex(index=years)
-        .reindex(columns=org_order)
-    )
-    area["합계"] = area.sum(axis=1)
+    cur_org = agg_per_org(df_cur)
+    total_energy_cur = cur_org["에너지사용량"].sum()
 
-    # 3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
-    avg3 = pd.DataFrame(index=years, columns=usage.columns, dtype=float)
-    for y in years:
-        prev_years = [py for py in years if py < y][-3:]
-        if not prev_years:
-            baseline = usage.loc[y]
+    # 전년/3개년용 기관별 에너지 사용량
+    prev_org = agg_per_org(df_prev) if not df_prev.empty else pd.DataFrame(columns=cur_org.columns)
+    three_year_org = (
+        df_3y.groupby(["기준연도", "소속기관명"], dropna=False)["연단위"]
+        .sum()
+        .reset_index()
+    )
+
+    # 기관별 3개년 평균 계산
+    avg_3y_map = {}
+    for org in cur_org["소속기관명"]:
+        hist = three_year_org[three_year_org["소속기관명"] == org]
+        if hist.empty:
+            avg_3y_map[org] = np.nan
         else:
-            baseline = usage.loc[prev_years].mean()
-        avg3.loc[y] = baseline
+            avg_3y_map[org] = hist["연단위"].mean()
 
-    def _reset_index_as_label(df_in: pd.DataFrame) -> pd.DataFrame:
-        out = df_in.copy()
-        out.insert(0, "구분", out.index.astype(str))
-        return out.reset_index(drop=True)
-
-    return (
-        _reset_index_as_label(usage),
-        _reset_index_as_label(area),
-        _reset_index_as_label(avg3),
+    # 시설구분별 면적대비 에너지 사용비율 평균을 구하기 위해
+    # 먼저 기관별 면적대비 비율을 계산
+    cur_org["면적대비에너지사용비율"] = (
+        cur_org["연면적"] / cur_org["에너지사용량"] * 100
     )
 
-# ===========================================================
-# 📊 대시보드 탭 렌더링 (에너지 사용량 분석 + 피드백)
-# ===========================================================
-def render_dashboard_tab(
-    spec: dict,
-    fmt_rules: Mapping[str, Mapping],
-    analysis_year_to_raw: Mapping[int, pd.DataFrame],
-    selected_year: int,
-    view_mode: str,
-    selected_org: Optional[str],
-) -> None:
-    if not analysis_year_to_raw:
-        st.info(
-            "선택된 조건에 해당하는 df_raw 데이터가 없습니다. "
-            "먼저 '📂 에너지 사용량 파일 업로드' 탭에서 파일을 업로드해 주세요."
-        )
-        return
+    facility_type_avg = (
+        cur_org.groupby("시설구분")["면적대비에너지사용비율"].mean()
+    )  # 의료/복지/기타별 평균 (%)
 
-    # -------------------------------------------------------
-    # 1. 에너지 사용량 분석 (data_2)
-    # -------------------------------------------------------
-    st.subheader("에너지 사용량 분석")
+    # 각 기관별 지표 계산
+    rows = []
+    change_rates_3y_for_total_avg = []
 
-    try:
-        data2 = build_data_2_usage_analysis(
-            analysis_year_to_raw,
-            current_year=selected_year,
-        )
-    except Exception as e:
-        st.exception(e)
-        return
+    for _, r in cur_org.iterrows():
+        org = r["소속기관명"]
+        facility_type = r["시설구분"]
+        area = r["연면적"]
+        energy_cur = r["에너지사용량"]
 
-    data2_overall = data2.overall.copy()
-    data2_by_org = data2.by_org.copy()
+        # 면적대비 에너지 사용비율 (%)
+        area_ratio = area / energy_cur * 100 if energy_cur > 0 else np.nan
 
-    # 기관 정렬 순서 고정
-    org_order = list(get_org_order())
-    data2_by_org = data2_by_org.reindex(org_order)
+        # 에너지 사용 비중 (%)
+        share = energy_cur / total_energy_cur * 100 if total_energy_cur > 0 else np.nan
 
-    DATA2_OVERALL_FMT = {
-        "에너지 사용량(현재 기준)": "energy_kwh_int",
-        "전년대비 증감률": "percent_2",
-        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
-        "의료시설": "ratio_2",
-        "복지시설": "ratio_2",
-        "기타시설": "ratio_2",
-    }
-    DATA2_BYORG_FMT = {
-        "연면적": "area_m2_int",
-        "에너지 사용량": "energy_kwh_int",
-        "면적대비 에너지 사용비율": "ratio_2",
-        "에너지 사용 비중": "percent_2",
-        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
-        "시설별 평균 면적 대비 에너지 사용비율": "ratio_2",
-    }
+        # 3개년 평균 대비 증감률
+        avg_3y = avg_3y_map.get(org, np.nan)
+        if pd.isna(avg_3y) or avg_3y == 0:
+            change_vs_3y = np.nan
+        else:
+            change_vs_3y = (energy_cur - avg_3y) / avg_3y * 100
 
-    df2_overall_fmt = format_table(
-        data2_overall,
-        fmt_rules,
-        DATA2_OVERALL_FMT,
-    )
-    df2_by_org_fmt = format_table(
-        data2_by_org,
-        fmt_rules,
-        DATA2_BYORG_FMT,
-    )
+        # 시설별 평균 면적 대비 에너지 사용비율 (%)
+        type_avg = facility_type_avg.get(facility_type, np.nan)
+        if pd.isna(type_avg) or type_avg == 0:
+            area_ratio_vs_type_avg = np.nan
+        else:
+            area_ratio_vs_type_avg = area_ratio / type_avg * 100
 
-    col1, col2 = st.columns([1.3, 1])
-
-    with col1:
-        suffix = ""
-        if view_mode == "기관별" and selected_org:
-            suffix = f" ({selected_org})"
-        st.markdown(f"**1. 공단 전체 기준{suffix}**")
-        st.dataframe(df2_overall_fmt, use_container_width=True)
-
-    with col2:
-        st.markdown("**시설구분별 면적대비 평균 에너지 사용비율**")
-        fac_cols = ["의료시설", "복지시설", "기타시설"]
-        fac_df = df2_overall_fmt[fac_cols].T
-        fac_df.columns = ["면적대비 에너지 사용비율"]
-        st.dataframe(fac_df, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**2. 소속기구별 분석**")
-    st.dataframe(df2_by_org_fmt, use_container_width=True)
-
-    # -------------------------------------------------------
-    # 2. 피드백 (data_3)
-    # -------------------------------------------------------
-    st.subheader("피드백")
-
-    try:
-        data3 = build_data_3_feedback(
-            analysis_year_to_raw,
-            current_year=selected_year,
-        )
-    except Exception as e:
-        st.exception(e)
-        return
-
-    DATA3_OVERALL_FMT = {
-        "권장 에너지 사용량": "energy_kwh_int",
-        "전년대비 감축률": "percent_2",
-        "3개년 대비 감축률": "percent_2",
-    }
-    DATA3_BYORG_FMT = {
-        "권장 에너지 사용량": "energy_kwh_int",
-        "권장 사용량 대비 에너지 사용 비율": "percent_2",
-    }
-
-    df3_overall_fmt = format_table(
-        data3.overall,
-        fmt_rules,
-        DATA3_OVERALL_FMT,
-    )
-
-    df3_by_org = data3.by_org.copy().reindex(org_order)
-    df3_by_org_fmt = format_table(
-        df3_by_org,
-        fmt_rules,
-        DATA3_BYORG_FMT,
-    )
-
-    st.markdown("**1. 공단 전체 기준**")
-    st.dataframe(df3_overall_fmt, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**2. 소속기구별**")
-    st.dataframe(df3_by_org_fmt, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
-    df3_detail = data3.detail.copy().reindex(org_order)
-    st.dataframe(df3_detail, use_container_width=True)
-
-# ===========================================================
-# 📂 업로드 탭 렌더링
-# ===========================================================
-def render_upload_tab(
-    spec: dict,
-    fmt_rules: Mapping[str, Mapping],
-    df_raw_all: Optional[pd.DataFrame],
-) -> None:
-    st.subheader("공단 에너지 사용량 파일 업로드")
-
-    st.write(
-        "- 연도별 《에너지 사용량관리.xlsx》 파일을 업로드하면, "
-        "df_raw(U/V/W 기반이 아닌 연단위 기준)로 변환하여 분석에 사용합니다."
-    )
-
-    # 1) 파일 업로드 위젯
-    uploaded_files = st.file_uploader(
-        "연도별 에너지 사용량 파일 업로드 (여러 개 선택 가능)",
-        type=["xlsx"],
-        accept_multiple_files=True,
-    )
-
-    # 2) 세션 상태에 업로드 파일 반영
-    if uploaded_files:
-        year_to_file_session: Dict[int, object] = st.session_state.get(
-            "year_to_file", {}
-        )
-        for f in uploaded_files:
-            year = infer_year_from_filename(f.name)
-            if year is None:
-                st.warning(f"연도를 찾을 수 없어 무시된 파일: {f.name}")
-                continue
-            year_to_file_session[year] = f
-        st.session_state["year_to_file"] = year_to_file_session
-
-    # 3) 현재 인식된 파일 목록 표시
-    st.markdown("#### 인식된 연도별 파일 목록")
-    merged = get_year_to_file()
-    if not merged:
-        st.info("현재 인식된 에너지 사용량 파일이 없습니다.")
-    else:
-        rows = [
-            {"연도": year, "파일명": getattr(f, "name", str(f))}
-            for year, f in sorted(merged.items())
-        ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-    st.markdown("---")
-
-    # 4) df_raw_all 이 비어 있으면 여기서 한 번 더 로딩을 시도 (안전장치)
-    if (df_raw_all is None or df_raw_all.empty) and merged:
-        try:
-            year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-            df_raw_all = df_raw_all_tmp
-
-            # 🔹 df_raw / year_to_raw 를 세션에 캐시
-            st.session_state["year_to_raw_cache"] = year_to_raw_tmp
-            st.session_state["df_raw_all_cache"] = df_raw_all_tmp
-
-            st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
-
-            # 🔁 캐시 반영 후 즉시 전체 스크립트를 재실행
-            st.experimental_rerun()
-
-        except Exception as e:
-            st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
-            st.exception(e)
-            return
-
-    # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
-    if df_raw_all is None or df_raw_all.empty:
-        st.info("아직 df_raw 데이터가 없어 백데이터 분석 표를 생성할 수 없습니다.")
-        return
-
-    # 6) data_1용 표 생성
-    try:
-        tbl_usage, tbl_area, tbl_avg3 = build_data1_tables(df_raw_all)
-    except Exception as e:
-        st.error("data_1(백데이터 분석) 표 생성 중 오류가 발생했습니다.")
-        st.exception(e)
-        return
-
-    # 공통: '구분' 컬럼은 포맷 적용 안 함 (연도 문자열 그대로)
-    no_format_for_label = {"구분": ""}
-
-    # 7) 표 렌더링
-    st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
-    tbl_usage_fmt = format_table(
-        tbl_usage,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        # 숫자: 정수 + 천단위 콤마, 단위 없음
-        default_fmt_name="integer_comma",
-    )
-    st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.markdown("### 2. 연도×기관 연면적")
-    tbl_area_fmt = format_table(
-        tbl_area,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        default_fmt_name="integer_comma",
-    )
-    st.dataframe(tbl_area_fmt, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.markdown("### 3. 연도별 3개년 평균 에너지 사용량")
-    tbl_avg3_fmt = format_table(
-        tbl_avg3,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        default_fmt_name="integer_comma",
-    )
-    st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
-
-
-
-# ===========================================================
-# 🔧 디버그 / 진단 탭 렌더링
-# ===========================================================
-def render_debug_tab(
-    year_to_raw: Mapping[int, pd.DataFrame],
-    df_raw_all: pd.DataFrame,
-) -> None:
-    st.subheader("df_raw 메타 정보")
-
-    years_available = sorted(year_to_raw.keys())
-    st.write("로딩된 연도:", years_available)
-
-    info_rows = []
-    for year, df in year_to_raw.items():
-        info_rows.append(
+        rows.append(
             {
-                "연도": year,
-                "행 수": len(df),
-                "기관 수": df["기관명"].nunique(),
+                "구 분": org,
+                "시설구분": facility_type,
+                "연면적": area,
+                "에너지 사용량": energy_cur,
+                "면적대비 에너지 사용비율(%)": area_ratio,
+                "에너지 사용 비중(%)": share,
+                "3개년 평균 에너지 사용량 대비 증감률(%)": change_vs_3y,
+                "시설별 평균 면적 대비 에너지 사용비율(%)": area_ratio_vs_type_avg,
             }
         )
-    st.dataframe(pd.DataFrame(info_rows), use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("df_raw 전체 데이터 (상위 100행)")
-    st.dataframe(df_raw_all.head(100), use_container_width=True)
+        if not pd.isna(change_vs_3y):
+            change_rates_3y_for_total_avg.append(change_vs_3y)
 
-    st.markdown("---")
-    st.subheader("df_raw 컬럼 정보")
-    st.json(
-        {
-            "columns": df_raw_all.columns.tolist(),
-            "dtypes": {c: str(t) for c, t in df_raw_all.dtypes.items()},
-        }
+    org_table = pd.DataFrame(rows)
+
+    # 합계 행 (엑셀처럼 "행들의 평균"을 사용하는 컬럼은 평균으로)
+    total_row = {
+        "구 분": "합 계",
+        "시설구분": "",
+        "연면적": org_table["연면적"].sum(),
+        "에너지 사용량": org_table["에너지 사용량"].sum(),
+        # 면적대비 에너지 사용비율 -> 행별 값의 평균 (엑셀 1.03%)
+        "면적대비 에너지 사용비율(%)": org_table["면적대비 에너지 사용비율(%)"].mean(),
+        "에너지 사용 비중(%)": 100.0,
+        # 3개년 평균 대비 증감률 -> 행별 값의 평균 (엑셀 18.59%)
+        "3개년 평균 에너지 사용량 대비 증감률(%)": np.nanmean(change_rates_3y_for_total_avg)
+        if change_rates_3y_for_total_avg
+        else np.nan,
+        # 시설별 평균 면적 대비 에너지 사용비율 -> 100%
+        "시설별 평균 면적 대비 에너지 사용비율(%)": 100.0,
+    }
+
+    org_table = pd.concat(
+        [org_table, pd.DataFrame([total_row])], ignore_index=True
     )
 
-# ===========================================================
-# 메인 함수 (1) – 초기 설정 및 spec / 데이터 로딩
-# ===========================================================
-def main() -> None:
-    st.set_page_config(
-        page_title="공단 에너지 사용량·온실가스 관리 대시보드",
-        layout="wide",
-    )
-
-    st.title("공단 에너지 사용량·온실가스 관리 대시보드")
-
-    # -------------------------------------------------------
-    # 0. spec 로딩
-    # -------------------------------------------------------
-    try:
-        spec = load_spec()
-    except Exception as e:
-        log_error(f"사양 파일 로딩 중 오류가 발생했습니다: {e}")
-        st.stop()
-
-    fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
-
-    # -------------------------------------------------------
-    # 1. 에너지 사용량 파일 로딩
-    #    - 우선 업로드 탭에서 생성해 둔 캐시(year_to_raw_cache)를 사용
-    #    - 캐시가 없을 때만 load_energy_files()를 호출
-    # -------------------------------------------------------
-    year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
-        "year_to_raw_cache", {}
-    )
-    df_raw_all: Optional[pd.DataFrame] = st.session_state.get(
-        "df_raw_all_cache"
-    )
-
-    # 캐시가 아직 없다면, 현재 인식된 파일 목록으로부터 새로 로딩
-    if not year_to_raw:
-        year_to_file = get_year_to_file()
-
-        if year_to_file:
-            try:
-                year_to_raw, df_raw_all = load_energy_files(year_to_file)
-                # 로딩에 성공하면 캐시로 저장
-                st.session_state["year_to_raw_cache"] = year_to_raw
-                st.session_state["df_raw_all_cache"] = df_raw_all
-            except Exception as e:
-                st.warning(
-                    "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
-                    "업로드 탭에서 파일을 다시 확인해 주세요."
-                )
-                st.exception(e)
-
-    years_available = sorted(year_to_raw.keys())
+    return org_table
 
 
+def compute_corp_summary(
+    org_table: pd.DataFrame,
+    all_data: pd.DataFrame,
+    base_year: int,
+) -> pd.DataFrame:
+    """
+    1. 공단 전체 기준 표 생성.
+    - org_table: 바로 위 함수의 결과 전체(필터 적용 전 기준)
+    - all_data : concat_years 한 전체 df_raw
+    """
 
-    # -------------------------------------------------------
-    # 2. 사이드바 필터
-    # -------------------------------------------------------
-    with st.sidebar:
-        st.header("필터")
+    if org_table.empty or all_data.empty:
+        return pd.DataFrame()
 
-        view_mode = st.radio("보기 범위", ["공단 전체", "기관별"], index=0)
+    df = add_classification_columns(all_data)
 
-        if years_available:
-            current_year_spec = int(spec["meta"]["current_year"])
-            if current_year_spec in years_available:
-                default_year = current_year_spec
-            else:
-                default_year = years_available[-1]
+    df_cur = df[df["기준연도"] == base_year].copy()
+    df_prev = df[df["기준연도"] == base_year - 1].copy()
+    df_3y = df[df["기준연도"].between(base_year - 3, base_year - 1)].copy()
 
-            selected_year = st.selectbox(
-                "이행연도 선택",
-                years_available,
-                index=years_available.index(default_year),
-            )
+    # 전체 에너지
+    total_cur = df_cur["연단위"].sum()
+    total_prev = df_prev["연단위"].sum() if not df_prev.empty else np.nan
 
-            df_year = (
-                df_raw_all[df_raw_all["연도"] == selected_year]
-                if df_raw_all is not None
-                else pd.DataFrame()
-            )
-            orgs_in_data = (
-                df_year["기관명"].dropna().unique().tolist()
-                if not df_year.empty
-                else []
-            )
+    # 전년 대비 증감률
+    if pd.isna(total_prev) or total_prev == 0:
+        change_vs_prev = np.nan
+    else:
+        change_vs_prev = (total_cur - total_prev) / total_prev * 100
 
-            org_order = list(get_org_order())
-            orgs_in_data = sorted(
-                [o for o in org_order if o in orgs_in_data],
-                key=org_order.index,
-            )
-
-            selected_org: Optional[str] = None
-            if view_mode == "기관별":
-                if not orgs_in_data:
-                    log_warning(f"{selected_year}년 데이터에 소속기구가 없습니다.")
-                else:
-                    selected_org = st.selectbox("소속기구 선택", orgs_in_data)
-        else:
-            selected_year = None
-            selected_org = None
-            st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
-
-        st.selectbox(
-            "에너지 종류",
-            ["전체"],
-            index=0,
-            help="현재 버전에서는 전체 에너지 사용량 기준으로 계산합니다.",
+    # 3개년 평균 대비 증감률 (전체)
+    if df_3y.empty:
+        change_vs_3y = np.nan
+    else:
+        total_3y_avg = (
+            df_3y.groupby("기준연도")["연단위"].sum().mean()
+        )
+        change_vs_3y = (
+            (total_cur - total_3y_avg) / total_3y_avg * 100
+            if total_3y_avg > 0
+            else np.nan
         )
 
-    # -------------------------------------------------------
-    # 3. 탭 구성
-    # -------------------------------------------------------
-    tab_dashboard, tab_upload, tab_debug = st.tabs(
-        ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
+    # 시설구분별 면적대비 평균 에너지 사용비율
+    # -> 2번 표에서 이미 계산한 "면적대비 에너지 사용비율(%)" 의
+    #    시설구분별 평균값을 재사용
+    org_only = org_table[org_table["구 분"] != "합 계"].copy()
+    type_avg = (
+        org_only.groupby("시설구분")["면적대비 에너지 사용비율(%)"]
+        .mean()
+        .to_dict()
     )
 
-    # 분석에 사용할 year_to_raw (공단/기관별 구분)
-    if (
-        selected_year is not None
-        and view_mode == "기관별"
-        and selected_org is not None
-        and year_to_raw
-    ):
-        filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
-        for year, df in year_to_raw.items():
-            sub = df[df["기관명"] == selected_org].copy()
-            if not sub.empty:
-                filtered_year_to_raw[year] = sub
-        analysis_year_to_raw: Mapping[int, pd.DataFrame] = filtered_year_to_raw
+    corp_row = {
+        "구 분": "전 체",
+        "에너지 사용량(현재 기준)": total_cur,
+        "전년대비 증감률(%)": change_vs_prev,
+        "3개년 평균 에너지 사용량 대비 증감률(%)": change_vs_3y,
+        "의료시설 면적대비 평균 에너지 사용비율(%)": type_avg.get("의료시설", np.nan),
+        "복지시설 면적대비 평균 에너지 사용비율(%)": type_avg.get("복지시설", np.nan),
+        "기타시설 면적대비 평균 에너지 사용비율(%)": type_avg.get("기타시설", np.nan),
+    }
+
+    return pd.DataFrame([corp_row])
+
+
+def compute_trend_series(all_data: pd.DataFrame, org_filter: str = "공단 전체") -> pd.Series:
+    """
+    연도별 에너지 사용량 추이 (막대그래프용 series)
+    - org_filter == "공단 전체" 이면 전체 합
+    - 특정 기관명이면 해당 기관만 합
+    """
+    if all_data.empty:
+        return pd.Series(dtype=float)
+
+    df = add_classification_columns(all_data)
+
+    if org_filter != "공단 전체":
+        df = df[df["소속기관명"] == org_filter]
+
+    s = df.groupby("기준연도")["연단위"].sum().sort_index()
+    return s
+
+
+def compute_detail_table(
+    all_data: pd.DataFrame,
+    base_year: int,
+    org_filter: str = "공단 전체",
+) -> pd.DataFrame:
+    """
+    '에너지 사용량 관리 대상 상세'용 상세 테이블.
+    기관 + 연료 단위별로 현재·전년·3개년 평균, 면적대비 비율 등을 계산.
+    """
+
+    if all_data.empty:
+        return pd.DataFrame()
+
+    df = add_classification_columns(all_data)
+    df_cur = df[df["기준연도"] == base_year].copy()
+    df_prev = df[df["기준연도"] == base_year - 1].copy()
+    df_3y = df[df["기준연도"].between(base_year - 3, base_year - 1)].copy()
+
+    if org_filter != "공단 전체":
+        df_cur = df_cur[df_cur["소속기관명"] == org_filter]
+        df_prev = df_prev[df_prev["소속기관명"] == org_filter]
+        df_3y = df_3y[df_3y["소속기관명"] == org_filter]
+
+    if df_cur.empty:
+        return pd.DataFrame()
+
+    group_cols = ["소속기관명", "시설구분_대분류", "연료", "단위"]
+
+    def agg_for_year(d: pd.DataFrame, year: int | None) -> pd.DataFrame:
+        if d.empty:
+            return pd.DataFrame(columns=group_cols + ["연면적", "에너지사용량"])
+        g = (
+            d.groupby(group_cols, dropna=False)
+            .apply(
+                lambda g_: pd.Series(
+                    {
+                        "연면적": g_["연면적"].dropna().iloc[0]
+                        if not g_["연면적"].dropna().empty
+                        else np.nan,
+                        "에너지사용량": g_["연단위"].sum(),
+                    }
+                )
+            )
+            .reset_index()
+        )
+        if year is not None:
+            g["기준연도"] = year
+        return g
+
+    cur = agg_for_year(df_cur, base_year)
+    prev = agg_for_year(df_prev, base_year - 1)
+    avg3 = (
+        agg_for_year(df_3y, None)
+        .groupby(group_cols, dropna=False)["에너지사용량"]
+        .mean()
+        .reset_index()
+        .rename(columns={"에너지사용량": "에너지사용량_3개년평균"})
+    )
+
+    detail = cur.merge(
+        prev[group_cols + ["에너지사용량"]],
+        how="left",
+        on=group_cols,
+        suffixes=("", "_전년"),
+    ).merge(
+        avg3,
+        how="left",
+        on=group_cols,
+    )
+
+    # 증감률 계산
+    detail["전년대비 증감률(%)"] = np.where(
+        detail["에너지사용량_전년"] > 0,
+        (detail["에너지사용량"] - detail["에너지사용량_전년"])
+        / detail["에너지사용량_전년"]
+        * 100,
+        np.nan,
+    )
+
+    detail["3개년 평균 대비 증감률(%)"] = np.where(
+        detail["에너지사용량_3개년평균"] > 0,
+        (detail["에너지사용량"] - detail["에너지사용량_3개년평균"])
+        / detail["에너지사용량_3개년평균"]
+        * 100,
+        np.nan,
+    )
+
+    detail["면적대비 에너지 사용비율(%)"] = (
+        detail["연면적"] / detail["에너지사용량"] * 100
+    )
+
+    # 보기 좋게 정렬
+    detail = detail[
+        [
+            "소속기관명",
+            "시설구분_대분류",
+            "연료",
+            "단위",
+            "연면적",
+            "에너지사용량",
+            "에너지사용량_전년",
+            "에너지사용량_3개년평균",
+            "전년대비 증감률(%)",
+            "3개년 평균 대비 증감률(%)",
+            "면적대비 에너지 사용비율(%)",
+        ]
+    ].sort_values(["소속기관명", "연료"])
+
+    return detail
+
+
+# ============================================================
+# 3. 사이드바 – 업로드 & 필터
+# ============================================================
+
+st.sidebar.header("① 데이터 업로드 및 옵션")
+
+uploaded_2021 = st.sidebar.file_uploader("2021년 백데이터 업로드", type=["xlsx", "xls"], key="f2021")
+uploaded_2022 = st.sidebar.file_uploader("2022년 백데이터 업로드", type=["xlsx", "xls"], key="f2022")
+uploaded_2023 = st.sidebar.file_uploader("2023년 백데이터 업로드", type=["xlsx", "xls"], key="f2023")
+uploaded_2024 = st.sidebar.file_uploader("2024년 백데이터 업로드", type=["xlsx", "xls"], key="f2024")
+
+dfs_by_year: Dict[int, pd.DataFrame] = {}
+
+for year, up in [(2021, uploaded_2021), (2022, uploaded_2022),
+                 (2023, uploaded_2023), (2024, uploaded_2024)]:
+    if up is not None:
+        dfs_by_year[year] = load_raw_from_excel(up, year)
+
+if not dfs_by_year:
+    st.info("좌측에서 2021–2024년 백데이터 엑셀을 업로드하면 분석이 시작됩니다.")
+    st.stop()
+
+all_data = concat_years(dfs_by_year)
+
+available_years = sorted(dfs_by_year.keys())
+default_base_year = max(available_years)
+
+base_year = st.sidebar.selectbox(
+    "기준연도 선택",
+    options=available_years,
+    index=available_years.index(default_base_year),
+)
+
+# 기관 목록
+orgs_all = sorted(
+    all_data["소속기관명"].dropna().unique().tolist()
+)
+org_filter = st.sidebar.selectbox(
+    "소속기구 선택",
+    options=["공단 전체"] + orgs_all,
+    index=0,
+)
+
+# ============================================================
+# 4. 본문 화면 구성
+# ============================================================
+
+st.markdown(f"### 에너지 사용량 분석  (기준연도: **{base_year}년**)")
+
+# ------------------------------------------------------------
+# 4-1. 연도별 에너지 사용량 추이 (막대그래프)
+# ------------------------------------------------------------
+st.subheader("1. 연도별 에너지 사용량 추이")
+
+trend = compute_trend_series(all_data, org_filter=org_filter)
+if trend.empty:
+    st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
+else:
+    st.bar_chart(trend, use_container_width=True)
+
+# ------------------------------------------------------------
+# 4-2. 에너지 사용량 분석 – 공단 전체 기준 & 소속기구별
+# ------------------------------------------------------------
+
+st.subheader("2. 에너지 사용량 분석")
+
+# (1) 소속기구별 전체 표 계산 (필터 적용 전 기준)
+org_table_full = compute_org_level_table(all_data, base_year=base_year)
+
+if org_table_full.empty:
+    st.warning("해당 기준연도의 데이터가 없습니다.")
+    st.stop()
+
+# (2) 공단 전체 기준 테이블
+corp_summary = compute_corp_summary(org_table_full, all_data, base_year=base_year)
+
+with st.expander("1) 공단 전체기준", expanded=True):
+    st.dataframe(
+        corp_summary.style.format(
+            {
+                "에너지 사용량(현재 기준)": "{:,.0f}",
+                "전년대비 증감률(%)": "{:+.2f}%",
+                "3개년 평균 에너지 사용량 대비 증감률(%)": "{:+.2f}%",
+                "의료시설 면적대비 평균 에너지 사용비율(%)": "{:.2f}%",
+                "복지시설 면적대비 평균 에너지 사용비율(%)": "{:.2f}%",
+                "기타시설 면적대비 평균 에너지 사용비율(%)": "{:.2f}%",
+            }
+        ),
+        use_container_width=True,
+        height=90,
+    )
+    st.caption("※ 시설구분별 면적대비 평균 에너지 사용비율은 각 시설구분에 속하는 기관들의 "
+               "`연면적 / 에너지 사용량 * 100` 값을 단순 평균한 값입니다.")
+
+# (3) 소속기구별 표 – 여기서만 기관 필터 적용
+with st.expander("2) 소속기구별", expanded=True):
+    if org_filter != "공단 전체":
+        org_table_view = org_table_full[
+            (org_table_full["구 분"] == org_filter) | (org_table_full["구 분"] == "합 계")
+        ].reset_index(drop=True)
     else:
-        analysis_year_to_raw = year_to_raw
+        org_table_view = org_table_full.copy()
 
-    # 📊 대시보드 탭
-    with tab_dashboard:
-        if selected_year is None:
-            st.info(
-                "아직 분석 가능한 df_raw 데이터가 없습니다. "
-                "먼저 '📂 에너지 사용량 파일 업로드' 탭에서 연도별 파일을 업로드해 주세요."
-            )
-        else:
-            render_dashboard_tab(
-                spec,
-                fmt_rules,
-                analysis_year_to_raw,
-                selected_year,
-                view_mode,
-                selected_org,
-            )
+    st.dataframe(
+        org_table_view.style.format(
+            {
+                "연면적": "{:,.2f}",
+                "에너지 사용량": "{:,.0f}",
+                "면적대비 에너지 사용비율(%)": "{:.2f}%",
+                "에너지 사용 비중(%)": "{:.2f}%",
+                "3개년 평균 에너지 사용량 대비 증감률(%)": "{:+.2f}%",
+                "시설별 평균 면적 대비 에너지 사용비율(%)": "{:.2f}%",
+            }
+        ),
+        use_container_width=True,
+    )
 
-    # 📂 업로드 탭
-    with tab_upload:
-        render_upload_tab(spec, fmt_rules, df_raw_all=df_raw_all)
+# ------------------------------------------------------------
+# 4-3. 에너지 사용량 관리 대상 상세
+# ------------------------------------------------------------
 
-    # 🔧 디버그 탭
-    with tab_debug:
-        if not year_to_raw or df_raw_all is None:
-            st.info("아직 df_raw 데이터가 없습니다.")
-        else:
-            render_debug_tab(year_to_raw, df_raw_all)
+st.subheader("3. 에너지 사용량 관리 대상 상세")
 
-# ===========================================================
-# 엔트리 포인트
-# ===========================================================
-if __name__ == "__main__":
-    main()
+detail_table = compute_detail_table(all_data, base_year=base_year, org_filter=org_filter)
+
+if detail_table.empty:
+    st.info("상세 데이터를 만들 수 없습니다. (해당 조건의 데이터가 없음)")
+else:
+    st.dataframe(
+        detail_table.style.format(
+            {
+                "연면적": "{:,.2f}",
+                "에너지사용량": "{:,.0f}",
+                "에너지사용량_전년": "{:,.0f}",
+                "에너지사용량_3개년평균": "{:,.0f}",
+                "전년대비 증감률(%)": "{:+.2f}%",
+                "3개년 평균 대비 증감률(%)": "{:+.2f}%",
+                "면적대비 에너지 사용비율(%)": "{:.2f}%",
+            }
+        ),
+        use_container_width=True,
+        height=400,
+    )
+
+# ------------------------------------------------------------
+# 4-4. 서술식 피드백 (간단 버전)
+# ------------------------------------------------------------
+
+st.subheader("4. 에너지 사용량 서술형 피드백")
+
+# 간단한 규칙 기반 피드백 예시 (엑셀 formulas.json 규칙을 대체)
+org_table_for_feedback = org_table_full[org_table_full["구 분"] != "합 계"].copy()
+
+high_usage = org_table_for_feedback.sort_values(
+    "시설별 평균 면적 대비 에너지 사용비율(%)", ascending=False
+).head(3)
+
+low_usage = org_table_for_feedback.sort_values(
+    "시설별 평균 면적 대비 에너지 사용비율(%)", ascending=True
+).head(3)
+
+st.markdown("**① 면적당 에너지 사용이 높은 기관(상위 3개)**")
+for _, r in high_usage.iterrows():
+    st.write(
+        f"- {r['구 분']}: 시설구분 {r['시설구분']} / "
+        f"면적대비 사용비율 {r['면적대비 에너지 사용비율(%)']:.2f}% "
+        f"({r['시설별 평균 면적 대비 에너지 사용비율(%)']:.1f}% of type avg)"
+    )
+
+st.markdown("**② 면적당 에너지 사용이 낮은 기관(하위 3개)**")
+for _, r in low_usage.iterrows():
+    st.write(
+        f"- {r['구 분']}: 시설구분 {r['시설구분']} / "
+        f"면적대비 사용비율 {r['면적대비 에너지 사용비율(%)']:.2f}% "
+        f"({r['시설별 평균 면적 대비 에너지 사용비율(%)']:.1f}% of type avg)"
+    )
+
+st.caption(
+    "※ 서술형 피드백은 현재 간단한 규칙 기반으로 작성되어 있습니다. "
+    "기존 formulas.json / rules_template.json 규칙과 연결하려면, "
+    "위에서 계산된 지표들을 해당 규칙 엔진에 넘겨서 문장을 생성하면 됩니다."
+)
