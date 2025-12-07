@@ -153,56 +153,42 @@ def _compute_overall_usage(
 
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
-    시설구분별 '면적대비 에너지 사용비율' 평균 계산.
+    시설구분별 '면적대비 에너지 사용비율' 평균을 계산한다.
 
-    - 기관별 면적대비 비율 = 에너지 사용량 / 연면적
-    - 시설구분별로 해당 기관들의 비율을 단순 평균
+    엑셀:
+      =AVERAGEIFS(소속기구별!E11:E29, 소속기구별!B11:B29, 시설구분)
 
-    엑셀의
-      =AVERAGEIFS(소속기구별!E열, 소속기구별!B열, 시설구분)
-    과 최대한 맞추기 위한 구현.
+    절차:
+      1) 현재 연도 데이터만 사용
+      2) 기관별 (에너지 사용량, 연면적, 시설구분) 집계
+      3) 기관별 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
+      4) 시설구분별로 위 비율의 산술평균
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
         raise ValueError(f"{current_year}년 데이터가 없습니다.")
 
-    # 기관별 연단위 합계 / 연면적 / 시설구분
-    usage_by_org = df_year.groupby("기관명", dropna=False)["연단위"].sum()
-    area_by_org = df_year.groupby("기관명", dropna=False)["연면적"].max()
-    fac_by_org = df_year.groupby("기관명", dropna=False)["시설구분"].agg(
-        lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+    # 기관·시설구분 단위로 집계 (연단위 합, 연면적 최대값)
+    grouped = (
+        df_year.groupby(["기관명", "시설구분"], dropna=False)[["연단위", "연면적"]]
+        .agg({"연단위": "sum", "연면적": "max"})
     )
 
-    # 사용량 또는 면적이 0/NaN 인 기관 제외
-    valid = (usage_by_org > 0) & (area_by_org > 0)
-    usage_by_org = usage_by_org[valid]
-    area_by_org = area_by_org[valid]
-    fac_by_org = fac_by_org[valid]
+    # 기관별 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
+    usage_per_area = grouped["연단위"] / grouped["연면적"].replace(0, np.nan)
+    grouped["면적대비 에너지 사용비율"] = usage_per_area
 
-    if usage_by_org.empty:
-        raise ValueError("시설구분별 면적대비 사용비율을 계산할 유효한 기관 데이터가 없습니다.")
-
-    upa_org = usage_by_org / area_by_org
-
-    df_fac = pd.DataFrame(
-        {
-            "시설구분": fac_by_org,
-            "면적대비 에너지 사용비율": upa_org,
-        }
+    # 시설구분별 평균 (엑셀 AVERAGEIFS 와 동일한 개념)
+    fac_mean = (
+        grouped.groupby("시설구분", dropna=False)["면적대비 에너지 사용비율"]
+        .mean()
     )
-
-    grp = df_fac.groupby("시설구분", dropna=False)["면적대비 에너지 사용비율"].mean()
-
-    def get_value(ftype: str) -> float:
-        if ftype not in grp.index:
-            return float("nan")
-        return float(grp.loc[ftype])
 
     return pd.Series(
         {
-            "의료시설": get_value("의료시설"),
-            "복지시설": get_value("복지시설"),
-            "기타시설": get_value("기타시설"),
+            "의료시설": float(fac_mean.get("의료시설", np.nan)),
+            "복지시설": float(fac_mean.get("복지시설", np.nan)),
+            "기타시설": float(fac_mean.get("기타시설", np.nan)),
         }
     )
 
@@ -211,87 +197,76 @@ def _compute_org_level_current_metrics(
     df_all: pd.DataFrame,
     spec: dict,
     current_year: int,
-) -> Tuple[pd.DataFrame, pd.Series]:
+) -> pd.DataFrame:
     """
-    소속기구별 현재 연도 지표 + 3개년 평균(기관별)을 계산한다.
+    2. 에너지 사용량 분석 – 소속기구별 표 전체를 계산한다.
 
-    반환:
-      df_org : 각 기관별 지표 DataFrame
-      avg3   : 각 기관별 3개년 평균 에너지 사용량 (baseline)
+    - 에너지 사용량: 현재연도 사용량 합계
+    - 연면적: 현재연도 연면적 (기관별 최대값)
+    - 면적대비 에너지 사용비율: 에너지 사용량 / 연면적
+    - 에너지 사용 비중: 현재연도 사용량 / 현재연도 전체 사용량
+    - 3개년 평균 에너지 사용량 대비 증감률:
+        (현재연도 사용량 - 3개년 평균) / 3개년 평균
+      여기서 3개년 평균은 '1. 백데이터 분석'과 동일하게,
+      해당 연도보다 앞선 최대 3개년 평균을 사용한다.
+    - 시설별 평균 면적 대비 에너지 사용비율:
+        기관별 비율 / (같은 시설구분 기관들의 평균 비율)
     """
-    # spec 에 정의된 year in 필터 추출
-    calc_conf = None
-    for c in spec["logic"]["rules"]["calculations"]:
-        if c.get("name") == "org_level_current_year_metrics":
-            calc_conf = c
-            break
+    analysis_years: List[int] = spec["meta"]["analysis_years"]
+    years = [y for y in analysis_years if y in df_all["연도"].unique()]
 
-    if calc_conf is None:
-        raise ValueError(
-            "spec.logic.rules.calculations 에 org_level_current_year_metrics 가 없습니다."
-        )
+    if current_year not in years:
+        raise ValueError(f"{current_year}년 데이터가 df_all 에 없습니다.")
 
-    years_filter: List[int] = []
-    for f in calc_conf.get("filters", []):
-        if f.get("field") == "year" and f.get("op") == "in":
-            years_filter = list(f.get("value", []))
-            break
-
-    if not years_filter:
-        raise ValueError(
-            "org_level_current_year_metrics 의 year in 필터를 spec 에서 찾을 수 없습니다."
-        )
-
-    df = df_all[df_all["연도"].isin(years_filter)].copy()
-    if df.empty:
-        raise ValueError(f"year in {years_filter} 데이터가 없습니다.")
-
-    # 연도별 연단위 합계 (기관 × 연도)
+    # === 연도·기관별 사용량 피벗 (3개년 평균 계산용) ===
     usage_by_year_org = (
-        df.groupby(["기관명", "연도"], dropna=False)["연단위"].sum().unstack("연도")
+        df_all.groupby(["기관명", "연도"], dropna=False)["연단위"]
+        .sum()
+        .unstack(fill_value=0)
+        .reindex(columns=years, fill_value=0)
     )
 
-    # 결측 연도는 0으로 보정
-    for y in years_filter:
-        if y not in usage_by_year_org.columns:
-            usage_by_year_org[y] = 0.0
+    # === 현재연도 기준 기관별 메타 정보 (연면적, 시설구분) ===
+    df_cur = df_all[df_all["연도"] == current_year].copy()
+    if df_cur.empty:
+        raise ValueError(f"{current_year}년 데이터가 없습니다.")
 
-    usage_by_year_org = usage_by_year_org[sorted(usage_by_year_org.columns)]
+    area_by_org = df_cur.groupby("기관명", dropna=False)["연면적"].max()
+    fac_type_by_org = df_cur.groupby("기관명", dropna=False)["시설구분"].first()
 
-    # area, facility_type
-    area_by_org = df.groupby("기관명", dropna=False)["연면적"].max()
-    fac_type_by_org = df.groupby("기관명", dropna=False)["시설구분"].agg(
-        lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+    # 기관 목록 정렬 (spec 의 org_order 사용)
+    org_order = list(get_org_order())
+    usage_by_year_org = usage_by_year_org.reindex(org_order)
+    area_by_org = area_by_org.reindex(org_order)
+    fac_type_by_org = fac_type_by_org.reindex(org_order)
+
+    # === 3개년 평균 (연도별 각 소속기구별 평균) ===
+    baseline_by_year_org = pd.DataFrame(
+        index=usage_by_year_org.index, columns=years, dtype=float
     )
+    for i, y in enumerate(years):
+        prev_years = years[:i][-3:]  # 해당 연도 이전의 최대 3개년
+        if prev_years:
+            baseline_by_year_org[y] = usage_by_year_org[prev_years].mean(axis=1)
+        else:
+            baseline_by_year_org[y] = usage_by_year_org[y]
 
-    # 현재 연도 사용량
-    usage_cur = usage_by_year_org.get(
-        current_year, pd.Series(0.0, index=usage_by_year_org.index)
-    )
+    if current_year not in baseline_by_year_org.columns:
+        raise ValueError(f"{current_year}년의 3개년 평균 기준을 계산할 수 없습니다.")
 
-    # current_year 기준 직전 3개년 평균 (예: 2024 → 2021,22,23)
-    years_sorted = sorted(usage_by_year_org.columns)
-    if current_year not in years_sorted:
-        years_sorted = sorted(years_filter)
+    usage_cur = usage_by_year_org[current_year]
+    baseline_cur = baseline_by_year_org[current_year]
 
-    prev_years = [y for y in years_sorted if y < current_year]
-    three_years = prev_years[-3:]
-    if not three_years:
-        avg3 = usage_cur.copy()
-    else:
-        avg3 = usage_by_year_org[three_years].mean(axis=1)
+    # 3개년 평균 에너지 사용량 대비 증감률
+    vs3 = (usage_cur - baseline_cur) / baseline_cur.replace(0, np.nan)
 
-    # 3개년 평균 대비 증감률
-    vs3 = (usage_cur - avg3) / avg3.replace(0, np.nan)
-
-    # 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
+    # ✅ 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
     upa = usage_cur / area_by_org.replace(0, np.nan)
 
     total_cur = float(usage_cur.sum())
     if total_cur == 0:
         raise ValueError("현재연도 전체 사용량 합계가 0입니다.")
 
-    # 에너지 사용 비중
     share = usage_cur / total_cur
 
     df_org = pd.DataFrame(
@@ -305,19 +280,20 @@ def _compute_org_level_current_metrics(
         }
     )
 
-    # 시설별 평균 면적 대비 사용비율
+    # 시설별 평균 면적 대비 에너지 사용비율
     facility_mean = df_org.groupby("시설구분", dropna=False)[
         "면적대비 에너지 사용비율"
     ].transform("mean")
     df_org["시설별 평균 면적 대비 에너지 사용비율"] = (
-        df_org["면적대비 에너지 사용비율"] / facility_mean.replace(0, np.nan)
+        df_org["면적대비 에너지 사용비율"]
+        / facility_mean.replace(0, np.nan)
     )
 
     # 기관 고정 순서 적용
-    org_order = list(get_org_order())
     df_org = df_org.reindex(org_order)
 
-    return df_org, avg3
+    return df_org
+
 
 
 def build_data_2_usage_analysis(
@@ -366,9 +342,10 @@ def _compute_overall_feedback(
     """
     공단 전체 피드백 (권장 사용량 + 감축률) 계산.
 
-    - 권장 에너지 사용량: 공단 전체 3개년 평균 × (1 - NDC)
-    - 전년대비 감축률: -NDC (정책 목표)
-    - 3개년 대비 감축률: (권장 - 3개년 평균) / 3개년 평균
+    엑셀과 맞추기 위해:
+      - 권장 에너지 사용량: 공단 전체 3개년 평균 × (1 - NDC)
+      - 전년대비 감축률: -NDC (정책 목표값)
+      - 3개년 대비 감축률: (권장 - 3개년 평균) / 3개년 평균
     """
     analysis_years: List[int] = spec["meta"]["analysis_years"]
     ndc_rate: float = float(spec["meta"]["ndc_target_rate"])
@@ -379,6 +356,7 @@ def _compute_overall_feedback(
     if total_by_year.isna().any():
         raise ValueError("연도별 연단위 합계 계산 중 NaN 이 발생했습니다.")
 
+    # current_year 이전 연도 중 마지막 3개년 (예: 2021,2022,2023)
     past_years = [y for y in analysis_years if y < current_year]
     three_years = past_years[-3:]
     if not three_years:
@@ -386,8 +364,13 @@ def _compute_overall_feedback(
 
     avg3 = float(total_by_year.loc[three_years].mean())
 
+    # 🔹 권장 에너지 사용량 = 3개년 평균 × (1 - NDC)
     recommended = avg3 * (1.0 - ndc_rate)
+
+    # 전년대비 감축률: 정책상 목표치 그대로
     reduction_yoy = -ndc_rate
+
+    # 3개년 대비 감축률 = (권장 - 3개년 평균) / 3개년 평균
     reduction_vs3 = (recommended - avg3) / avg3
 
     return pd.Series(
@@ -397,6 +380,7 @@ def _compute_overall_feedback(
             "3개년 대비 감축률": reduction_vs3,
         }
     )
+
 
 
 def _compute_org_recommended_and_flags(
