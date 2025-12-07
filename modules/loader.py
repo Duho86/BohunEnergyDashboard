@@ -104,6 +104,36 @@ def get_org_order() -> Tuple[str, ...]:
 
 
 # ===========================================================
+# 기관별 시설군(의료/복지/기타) 매핑
+# ===========================================================
+
+ORG_FACILITY_GROUP: Dict[str, str] = {
+    # 의료시설
+    "중앙보훈병원": "의료시설",
+    "부산보훈병원": "의료시설",
+    "광주보훈병원": "의료시설",
+    "대구보훈병원": "의료시설",
+    "대전보훈병원": "의료시설",
+    "인천보훈병원": "의료시설",
+    # 복지시설 (요양원)
+    "수원보훈요양원": "복지시설",
+    "광주보훈요양원": "복지시설",
+    "김해보훈요양원": "복지시설",
+    "대구보훈요양원": "복지시설",
+    "대전보훈요양원": "복지시설",
+    "남양주보훈요양원": "복지시설",
+    "원주보훈요양원": "복지시설",
+    "전주보훈요양원": "복지시설",
+    # 기타시설
+    "본사": "기타시설",
+    "보훈교육연구원": "기타시설",
+    "보훈원": "기타시설",
+    "보훈재활체육센터": "기타시설",
+    "보훈휴양원": "기타시설",
+}
+
+
+# ===========================================================
 # 엑셀 컬럼 정규화/검사 유틸
 # ===========================================================
 
@@ -202,7 +232,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     출력 df_raw:
       - 연도, year
       - 기관명, org_name  (소속기관명과 동일)
-      - 시설구분
+      - 시설구분 (의료시설/복지시설/기타시설로 재매핑)
       - 연면적
       - 연단위  (연간 에너지 사용량)
     """
@@ -223,9 +253,11 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             f"현재 컬럼: {list(df.columns)}"
         )
 
-    # 기관명 / 시설구분
+    # 기관명
     org_series = df[org_col].astype(str).str.strip()
-    facility_type = df[FACILITY_TYPE_COL].astype(str).str.strip()
+
+    # 원본 시설구분(엑셀 값) – 필요 시 디버그용
+    facility_type_raw = df[FACILITY_TYPE_COL].astype(str).str.strip()
 
     # 연면적: 숫자화 후, 같은 기관 내 NaN 은 해당 기관의 최대값(보통 전기 줄)을 사용
     area_raw = pd.to_numeric(df[area_col], errors="coerce")
@@ -234,6 +266,18 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     # 연간 사용량(연단위)
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
+    # 기관명 → 시설군(의료/복지/기타) 매핑
+    org_unique = set(org_series.unique())
+    unknown_orgs = sorted(org_unique.difference(ORG_FACILITY_GROUP.keys()))
+    if unknown_orgs:
+        # 매핑 안 된 기관은 기타시설로 처리하되, 한 번 경고
+        _log_warning(
+            "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
+            + ", ".join(unknown_orgs)
+        )
+
+    facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
+
     # df_raw 구성
     df_raw = pd.DataFrame(
         {
@@ -241,14 +285,13 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             "year": int(year),
             "기관명": org_series,
             "org_name": org_series,
-            "시설구분": facility_type,
+            "시설구분": facility_group,
             "연면적": area,
             "연단위": annual_usage,
         }
     )
 
     return df_raw
-
 
 
 def load_energy_files(
