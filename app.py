@@ -564,6 +564,8 @@ def render_dashboard_tab(
 
     st.markdown("**1. 공단 전체 기준**")
     st.dataframe(df3_overall_fmt, use_container_width=True)
+    st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
+
 
     st.markdown("---")
     st.markdown("**2. 소속기구별**")
