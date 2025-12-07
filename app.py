@@ -155,8 +155,9 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     """기관별 값을 받아 원그래프(Altair)를 그린다.
 
     - use_abs=True: 음수 가능 지표(증감률 등)에 절대값 적용
-    - 색상 팔레트: category20 (최대 20개 색상)
+    - 색상 팔레트: category20
     - 기관명 정렬: value 내림차순(높은 값 → 낮은 값)
+    - 기타 그룹 없음: 모든 소속기구를 그대로 표시
     """
     if not ALT_AVAILABLE:
         st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
@@ -185,17 +186,10 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     # 값 큰 순으로 정렬 (높은 → 낮은)
     s = s.sort_values(ascending=False)
 
-    # 너무 많은 기관일 경우 상위 10개 + 기타 묶음
-    if len(s) > 10:
-        top = s.iloc[:10]
-        others = s.iloc[10:].sum()
-        top["기타"] = others
-        s = top
-
+    # 🔴 더 이상 상위 10개 + 기타로 묶지 않음 → 전체 소속기구 그대로 사용
     df = s.reset_index()
     df.columns = ["기관명", "value"]
 
-    # Altair 파이 차트 (v4/v5 호환 형태)
     chart = (
         alt.Chart(df)
         .mark_arc()
@@ -205,7 +199,7 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
                 field="기관명",
                 type="nominal",
                 sort=alt.SortField(field="value", order="descending"),
-                scale=alt.Scale(scheme="category20"),  # 색상 팔레트
+                scale=alt.Scale(scheme="category20"),
             ),
             tooltip=[
                 alt.Tooltip("기관명:N", title="기관명"),
@@ -216,6 +210,7 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     )
 
     st.altair_chart(chart, use_container_width=True)
+
 
 
 
