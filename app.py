@@ -23,13 +23,13 @@ try:
         build_data_2_usage_analysis,
         build_data_3_feedback,
     )
-except Exception as e:
-    st.error("내부 모듈 import 오류가 발생했습니다.")
+except Exception as e:  # 모듈 import 에러는 바로 보여주고 중단
+    st.error("내부 모듈(import) 중 오류가 발생했습니다. app.py / modules 경로를 확인해 주세요.")
     st.exception(e)
     st.stop()
 
 # ===========================================================
-# 경로
+# 경로 / 로그 유틸
 # ===========================================================
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -87,6 +87,7 @@ def get_year_to_file() -> Dict[int, object]:
 # 숫자 포맷팅 (master_energy_spec.formatting_rules 기반)
 # ===========================================================
 def format_number(value, rule: Mapping) -> str:
+    """spec.formatting_rules 의 규칙을 적용해 숫자를 문자열로 변환."""
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "-"
 
@@ -95,7 +96,7 @@ def format_number(value, rule: Mapping) -> str:
     except Exception:
         return str(value)
 
-    # ×100
+    # ×100 옵션
     if rule.get("multiply_by_100", False):
         v *= 100
 
@@ -121,6 +122,7 @@ def format_table(
     column_fmt_map: Mapping[str, str],
     default_fmt_name: Optional[str] = None,
 ) -> pd.DataFrame:
+    """각 컬럼에 지정된 포맷 규칙을 적용해 문자열 테이블로 변환."""
     if df is None or df.empty:
         return df
 
@@ -228,7 +230,9 @@ def render_dashboard_tab(
 
     try:
         df_list = [
-            df.copy() for df in analysis_year_to_raw.values() if df is not None and not df.empty
+            df.copy()
+            for df in analysis_year_to_raw.values()
+            if df is not None and not df.empty
         ]
         if df_list:
             df_all = pd.concat(df_list, ignore_index=True)
@@ -241,7 +245,7 @@ def render_dashboard_tab(
 
     col_g1, col_g2 = st.columns(2)
 
-    # 월별 에너지 사용량 추이 (라인)
+    # 월별 에너지 사용량 추이 (라인 그래프)
     with col_g1:
         st.markdown("**월별 에너지 사용량 추이**")
         if df_all.empty or "연도" not in df_all.columns:
@@ -263,7 +267,6 @@ def render_dashboard_tab(
                     "1월~12월 관련 컬럼을 찾지 못해 월별 에너지 사용량 그래프를 표시할 수 없습니다."
                 )
             else:
-                # 월 번호 기준으로 정렬 후, 해당 컬럼들만 사용
                 month_info.sort(key=lambda x: x[0])
                 month_nums = [m for m, _ in month_info]
                 month_cols = [c for _, c in month_info]
@@ -272,11 +275,10 @@ def render_dashboard_tab(
                     df_year[c] = pd.to_numeric(df_year[c], errors="coerce")
 
                 monthly = df_year[month_cols].sum(axis=0)
-                monthly.index = month_nums  # 인덱스를 1~12 숫자로
+                monthly.index = month_nums  # 1~12 숫자 인덱스
                 st.line_chart(monthly)
 
-
-    # 연도별 에너지 사용량 추이 (막대, 최대 5개년)
+    # 연도별 에너지 사용량 추이 (막대 그래프, 최대 5개년)
     with col_g2:
         st.markdown("**연도별 에너지 사용량 추이 (최대 5개년)**")
         if df_all.empty or "연도" not in df_all.columns:
@@ -309,21 +311,22 @@ def render_dashboard_tab(
             current_year=selected_year,
         )
     except Exception as e:
+        st.error("에너지 사용량 분석(data_2) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
     data2_overall = data2.overall.copy()
     data2_by_org = data2.by_org.copy()
 
-    # 기관 정렬 / 필터
     org_order = list(get_org_order())
+
+    # 보기 범위에 따른 기관 정렬 / 필터
     if view_mode == "공단 전체":
         data2_by_org = data2_by_org.reindex(org_order)
     elif view_mode == "기관별" and selected_org:
         if selected_org in data2_by_org.index:
             data2_by_org = data2_by_org.loc[[selected_org]]
         else:
-            # 선택 기관 데이터가 없으면 빈 표
             data2_by_org = data2_by_org.iloc[0:0]
 
     DATA2_OVERALL_FMT = {
@@ -375,12 +378,8 @@ def render_dashboard_tab(
             st.info("시설구분별 데이터가 없습니다.")
 
     st.markdown("---")
-    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
-    
-    if 'df3_detail' not in locals() or df3_detail is None or df3_detail.empty:
-        st.info("관리 대상 상세 데이터를 생성할 수 없습니다. (데이터 부족 또는 분석 오류)")
-    else:
-        st.dataframe(df3_detail, use_container_width=True)
+    st.markdown("**2. 소속기구별 분석**")
+    st.dataframe(df2_by_org_fmt, use_container_width=True)
 
     # -------------------------------------------------------
     # 2. 피드백 (data_3)
@@ -393,6 +392,7 @@ def render_dashboard_tab(
             current_year=selected_year,
         )
     except Exception as e:
+        st.error("피드백(data_3) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
@@ -413,7 +413,6 @@ def render_dashboard_tab(
         red_yoy = float(overall_row.get("전년대비 감축률", np.nan))
         red_vs3 = float(overall_row.get("3개년 대비 감축률", np.nan))
 
-        # 관리대상 기관 목록
         df_detail_tmp = data3.detail.copy()
         risk_mask = (df_detail_tmp == "O").any(axis=1)
         risk_orgs = df_detail_tmp.index[risk_mask].tolist()
@@ -436,7 +435,9 @@ def render_dashboard_tab(
                 "관리대상으로 분류된 기관: " + ", ".join(risk_orgs)
             )
 
-        comment_text = " ".join(parts) if parts else "피드백을 생성할 수 있는 데이터가 충분하지 않습니다."
+        comment_text = (
+            " ".join(parts) if parts else "피드백을 생성할 수 있는 데이터가 충분하지 않습니다."
+        )
 
         st.markdown(
             f"""
@@ -448,10 +449,10 @@ def render_dashboard_tab(
             unsafe_allow_html=True,
         )
     except Exception:
-        # 서술형 코멘트 생성 실패 시에도 표는 그대로 출력
+        # 서술형 피드백 블록 실패 시, 표 출력은 계속 진행
         pass
 
-    # 2-1. 표 포맷팅
+    # 2-1. 표 포맷팅 및 기관별 필터
     df3_overall_fmt = format_table(
         data3.overall,
         fmt_rules,
@@ -461,7 +462,6 @@ def render_dashboard_tab(
     df3_by_org = data3.by_org.copy()
     df3_detail = data3.detail.copy()
 
-    # 보기 모드에 따라 기관 정렬/필터
     if view_mode == "공단 전체":
         df3_by_org = df3_by_org.reindex(org_order)
         df3_detail = df3_detail.reindex(org_order)
@@ -489,8 +489,12 @@ def render_dashboard_tab(
     st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
-    st.markmarkdown("**3. 에너지 사용량 관리 대상 상세**")
-    st.dataframe(df3_detail, use_container_width=True)
+    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
+
+    if df3_detail is None or df3_detail.empty:
+        st.info("관리 대상 상세 데이터를 생성할 수 없습니다. (데이터 부족 또는 분석 오류)")
+    else:
+        st.dataframe(df3_detail, use_container_width=True)
 
 
 # ===========================================================
@@ -545,19 +549,14 @@ def render_upload_tab(
     # 4) df_raw_all 이 비어 있으면 여기서 한 번 더 로딩을 시도 (안전장치)
     if (df_raw_all is None or df_raw_all.empty) and merged:
         try:
-            # 업로드/로컬에서 인식된 year_to_file(= merged)을 기반으로 df_raw 생성
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
             df_raw_all = df_raw_all_tmp
 
-            # 🔹 df_raw / year_to_raw 를 세션에 캐시
             st.session_state["year_to_raw_cache"] = year_to_raw_tmp
             st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
             st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
-
-            # 🔁 캐시 반영 후 즉시 전체 스크립트를 재실행
             st.experimental_rerun()
-
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
@@ -571,16 +570,13 @@ def render_upload_tab(
     # 6) data_1용 표 생성
     try:
         tbl_usage, tbl_area, tbl_avg3 = build_data1_tables(df_raw_all)
-
     except Exception as e:
         st.error("data_1(백데이터 분석) 표 생성 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
-    # 공통: '구분' 컬럼은 포맷 적용 안 함 (연도 문자열 그대로)
     no_format_for_label = {"구분": ""}
 
-    # 6) 표 렌더링
     st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
     tbl_usage_fmt = format_table(
         tbl_usage,
@@ -759,7 +755,7 @@ def main() -> None:
         ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
     )
 
-    # 분석에 사용할 year_to_raw (공단/기관별 구분)
+    # 분석에 사용할 year_to_raw (기관별 보기에서는 선택 기관만 필터링)
     if (
         selected_year is not None
         and view_mode == "기관별"
