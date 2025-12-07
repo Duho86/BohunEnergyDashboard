@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -162,6 +162,9 @@ def _compute_overall_usage(
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
     overall_usage_by_facility_type.usage_per_area(시설구분별) 계산.
+    시설구분 값은 loader 단계에서
+      '의료시설' / '복지시설' / '기타시설'
+    로 이미 재매핑되어 있다고 가정한다.
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
@@ -204,6 +207,7 @@ def _compute_org_level_current_metrics(
        '에너지 사용 비중','3개년 평균 에너지 사용량 대비 증감률',
        '시설별 평균 면적 대비 에너지 사용비율']
     """
+    # spec 에 정의된 year in 필터 추출
     calc_conf = None
     for c in spec["logic"]["rules"]["calculations"]:
         if c.get("name") == "org_level_current_year_metrics":
@@ -408,7 +412,7 @@ def _compute_org_recommended_and_flags(
     # 성장률 (3개년 평균 대비)
     growth_rate = (cur_usage - avg3) / avg3.replace(0, np.nan)
 
-    # 순위 계산 (내림차순, 1등이 가장 큰 값)
+    # 순위 계산 (내림차순, 1등이 가장 큰 값) – float 그대로 유지 (IntCastingNaNError 방지)
     rank_by_usage = cur_usage.rank(ascending=False, method="min")
     rank_by_growth = growth_rate.rank(ascending=False, method="min")
     rank_by_upa = df_org_metrics["면적대비 에너지 사용비율"].rank(
@@ -423,9 +427,9 @@ def _compute_org_recommended_and_flags(
     ):
         _log_warning("일부 기관에서 순위 계산에 NaN 이 발생하여 순위를 0으로 표기합니다.")
 
-    rank_by_usage_int = rank_by_usage.fillna(0).astype(int)
-    rank_by_growth_int = rank_by_growth.fillna(0).astype(int)
-    rank_by_upa_int = rank_by_upa.fillna(0).astype(int)
+    rank_by_usage_val = rank_by_usage.fillna(0.0)
+    rank_by_growth_val = rank_by_growth.fillna(0.0)
+    rank_by_upa_val = rank_by_upa.fillna(0.0)
 
     # management_flag: 조건1 OR 조건2
     upa = df_org_metrics["면적대비 에너지 사용비율"]
@@ -438,9 +442,9 @@ def _compute_org_recommended_and_flags(
 
     df_by_org = pd.DataFrame(
         {
-            "사용 분포 순위": rank_by_usage_int,
-            "에너지 3개년 평균 증가 순위": rank_by_growth_int,
-            "평균 에너지 사용량(연면적 기준) 순위": rank_by_upa_int,
+            "사용 분포 순위": rank_by_usage_val,
+            "에너지 3개년 평균 증가 순위": rank_by_growth_val,
+            "평균 에너지 사용량(연면적 기준) 순위": rank_by_upa_val,
             "권장 에너지 사용량": recommended,
             "권장 사용량 대비 에너지 사용 비율": usage_vs_recommended,
             "에너지 사용량 관리 대상": flag_text,
