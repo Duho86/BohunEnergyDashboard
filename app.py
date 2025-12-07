@@ -376,7 +376,11 @@ def render_dashboard_tab(
 
     st.markdown("---")
     st.markdown("**3. 에너지 사용량 관리 대상 상세**")
-    st.dataframe(df3_detail, use_container_width=True)
+    
+    if 'df3_detail' not in locals() or df3_detail is None or df3_detail.empty:
+        st.info("관리 대상 상세 데이터를 생성할 수 없습니다. (데이터 부족 또는 분석 오류)")
+    else:
+        st.dataframe(df3_detail, use_container_width=True)
 
     # -------------------------------------------------------
     # 2. 피드백 (data_3)
