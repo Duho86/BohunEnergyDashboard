@@ -564,6 +564,8 @@ def render_dashboard_tab(
 
     st.markdown("**1. 공단 전체 기준**")
     st.dataframe(df3_overall_fmt, use_container_width=True)
+    st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
+
 
     st.markdown("---")
     st.markdown("**2. 소속기구별**")
@@ -836,31 +838,36 @@ def main() -> None:
 
     fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
 
-    # -------------------------------------------------------
-    # 1. 에너지 사용량 파일 로딩 (캐시 우선)
+        # -------------------------------------------------------
+    # 1. 에너지 사용량 파일 로딩 (캐시 + 실제 파일 동기화)
     # -------------------------------------------------------
     year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
         "year_to_raw_cache", {}
     )
-    df_raw_all: Optional[pd.DataFrame] = st.session_state.get(
-        "df_raw_all_cache"
-    )
+    df_raw_all: Optional[pd.DataFrame] = st.session_state.get("df_raw_all_cache")
 
-    if not year_to_raw:
-        year_to_file = get_year_to_file()
-        if year_to_file:
-            try:
-                year_to_raw, df_raw_all = load_energy_files(year_to_file)
-                st.session_state["year_to_raw_cache"] = year_to_raw
-                st.session_state["df_raw_all_cache"] = df_raw_all
-            except Exception as e:
-                st.warning(
-                    "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
-                    "업로드 탭에서 파일을 다시 확인해 주세요."
-                )
-                st.exception(e)
+    # 현재 인식된 파일 목록
+    year_to_file = get_year_to_file()
 
-    years_available = sorted(year_to_raw.keys())
+    # 🔹 파일은 있는데 캐시가 없거나(df_raw_all 이 None/empty) 하면 강제 재로딩
+    if year_to_file and (not year_to_raw or df_raw_all is None or df_raw_all.empty):
+        try:
+            year_to_raw, df_raw_all = load_energy_files(year_to_file)
+            st.session_state["year_to_raw_cache"] = year_to_raw
+            st.session_state["df_raw_all_cache"] = df_raw_all
+        except Exception as e:
+            st.warning(
+                "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
+                "업로드 탭에서 파일 목록과 형식을 다시 확인해 주세요."
+            )
+            st.exception(e)
+            year_to_raw = {}
+            df_raw_all = None
+    elif not year_to_file:
+        # 파일 자체가 없으면 캐시도 비움
+        year_to_raw = {}
+        df_raw_all = None
+
 
     # -------------------------------------------------------
     # 2. 사이드바 필터
