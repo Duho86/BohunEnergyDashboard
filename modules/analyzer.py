@@ -83,7 +83,7 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
                 f"{year}년 df_raw에서 연도/연면적/연단위에 NaN 이 있는 행 {na_cnt}개를 분석에서 제외합니다.\n"
                 f"{bad_rows.to_string(index=False)}"
             )
-            tmp = tmp.loc[~na_mask].copy()
+           tmp[num_cols] = tmp[num_cols].fillna(0)
 
         dfs.append(tmp)
 
