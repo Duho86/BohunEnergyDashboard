@@ -282,6 +282,257 @@ def build_data1_tables(df_raw_all: pd.DataFrame):
 
 
 # ===========================================================
+# 🔎 AI 자동 피드백 생성 유틸
+# ===========================================================
+def _fmt_pct(x: float, digits: int = 2) -> str:
+    if pd.isna(x):
+        return "-"
+    return f"{x * 100:.{digits}f}%"
+
+
+def _fmt_energy(x: float) -> str:
+    if pd.isna(x):
+        return "-"
+    return f"{x:,.0f}"
+
+
+def generate_global_feedback_text(
+    selected_year: int,
+    df3_overall: pd.DataFrame,
+    data2_overall: pd.DataFrame,
+    data2_by_org: pd.DataFrame,
+    df3_by_org: pd.DataFrame,
+) -> str:
+    """공단 전체 기준 종합분석 텍스트 생성"""
+
+    if df3_overall is None or df3_overall.empty:
+        return "데이터가 부족하여 공단 전체 종합분석을 생성할 수 없습니다."
+
+    row_overall_fb = df3_overall.iloc[0]
+    row_overall_usage = data2_overall.iloc[0]
+
+    target = row_overall_fb.get("권장 에너지 사용량", np.nan)
+    year_change = row_overall_usage.get("전년대비 증감률", np.nan)
+    avg3_change = row_overall_usage.get(
+        "3개년 평균 에너지 사용량 대비 증감률", np.nan
+    )
+
+    # 증가율 TOP3 (3개년 평균 대비 증감률)
+    inc_list: list[str] = []
+    if "3개년 평균 에너지 사용량 대비 증감률" in data2_by_org.columns:
+        growth = data2_by_org[
+            "3개년 평균 에너지 사용량 대비 증감률"
+        ].dropna()
+        growth_top = growth.sort_values(ascending=False).head(3)
+        inc_list = [
+            f"{org} ({_fmt_pct(val)})" for org, val in growth_top.items()
+        ]
+
+    # 면적대비 사용량 TOP3
+    area_list: list[str] = []
+    if "면적대비 에너지 사용비율" in data2_by_org.columns:
+        upa = data2_by_org["면적대비 에너지 사용비율"].dropna()
+        upa_top = upa.sort_values(ascending=False).head(3)
+        area_list = [
+            f"{org} ({_fmt_pct(val)})" for org, val in upa_top.items()
+        ]
+
+    # 전체 추세 판단
+    if pd.isna(year_change) or pd.isna(avg3_change):
+        summary = "데이터가 충분하지 않아 추세 판단이 어렵습니다."
+    else:
+        if year_change > 0 and avg3_change > 0:
+            summary = (
+                "전년 및 최근 3개년 평균 대비 에너지 사용량이 모두 증가하는 "
+                "추세입니다."
+            )
+        elif year_change < 0 and avg3_change < 0:
+            summary = (
+                "전년 및 최근 3개년 평균 대비 에너지 사용량이 모두 감소하는 "
+                "추세입니다."
+            )
+        elif year_change > 0 and avg3_change <= 0:
+            summary = (
+                "전년 대비로는 소폭 증가했지만, 최근 3개년 평균 기준으로는 "
+                "안정 또는 감소 추세입니다."
+            )
+        elif year_change < 0 and avg3_change >= 0:
+            summary = (
+                "전년 대비로는 감소했지만, 최근 3개년 평균 기준으로는 "
+                "여전히 높은 수준을 유지하고 있습니다."
+            )
+        else:
+            summary = (
+                "전년 대비와 최근 3개년 평균 대비 추세가 상이하여 "
+                "세부 원인 분석이 필요합니다."
+            )
+
+    # 이슈 기관: 관리대상(O) 중 사용 분포 순위가 높은 기관
+    issue_org = None
+    tmp = df3_by_org.copy()
+    if "에너지 사용량 관리 대상" in tmp.columns:
+        tmp = tmp[tmp["에너지 사용량 관리 대상"] == "O"]
+    if "사용 분포 순위" in tmp.columns and not tmp.empty:
+        tmp = tmp.sort_values("사용 분포 순위")  # 1위가 가장 높은 비중
+        if not tmp.empty:
+            issue_org = tmp.index[0]
+    issue_org_text = issue_org if issue_org else "특정 기관"
+
+    lines: list[str] = []
+    lines.append(
+        f"{selected_year}년 권장 에너지 사용량: "
+        f"**{_fmt_energy(target)} kWh**"
+    )
+    lines.append(f"전년 대비 증감률: **{_fmt_pct(year_change)}**")
+    lines.append(
+        f"최근 3개년 평균 대비 증감률: **{_fmt_pct(avg3_change)}**\n"
+    )
+
+    lines.append("**● 관리대상 기관 자동 탐지**")
+    lines.append(
+        "- 증가율이 높은 기관: "
+        + (", ".join(inc_list) if inc_list else "해당 없음")
+    )
+    lines.append(
+        "- 면적 대비 사용량이 높은 기관: "
+        + (", ".join(area_list) if area_list else "해당 없음")
+    )
+    lines.append("")
+    lines.append("**● 종합판단(자동 문구)**")
+    lines.append(
+        f"공단 전체적으로는 {summary} "
+        f"특히 **{issue_org_text}**의 에너지 사용 수준에 대한 "
+        "면밀한 모니터링이 필요합니다."
+    )
+
+    return "\n".join(lines)
+
+
+def generate_institution_feedback_text(
+    org_name: str,
+    row2: pd.Series,
+    row3: pd.Series,
+    upa_mean: float,
+    total_orgs: int,
+) -> str:
+    """소속기구별 맞춤형 피드백 텍스트 생성"""
+
+    upa = row2.get("면적대비 에너지 사용비율", np.nan)
+    vs3 = row2.get("3개년 평균 에너지 사용량 대비 증감률", np.nan)
+    rank_share = row3.get("사용 분포 순위", np.nan)
+
+    # 증가/감소 추세
+    if pd.isna(vs3) or abs(vs3) < 0.001:
+        trend_word = "유지"
+    elif vs3 > 0:
+        trend_word = "증가"
+    else:
+        trend_word = "감소"
+
+    # 공단 평균 대비 수준
+    if pd.isna(upa) or pd.isna(upa_mean):
+        level_word = "평가 불가"
+    elif upa > upa_mean * 1.05:
+        level_word = "공단 평균 대비 **높은** 수준"
+    elif upa < upa_mean * 0.95:
+        level_word = "공단 평균 대비 **낮은** 수준"
+    else:
+        level_word = "공단 평균과 **유사한** 수준"
+
+    # 비중 순위
+    if pd.isna(rank_share):
+        rank_text = "순위 정보 없음"
+    else:
+        rank_text = f"{int(rank_share)}/{total_orgs}"
+
+    # 조건별 제안 문구
+    suggestions: list[str] = []
+    if not pd.isna(vs3) and vs3 > 0:
+        suggestions.append(
+            "• 증가 요인(증축, 운영시간 증가 등)을 분석하고 "
+            "절감 목표를 재설정할 필요가 있습니다."
+        )
+    if not pd.isna(upa) and not pd.isna(upa_mean) and upa > upa_mean * 1.05:
+        suggestions.append(
+            "• 냉난방 효율, 단열 상태, 운영 기준 등을 점검하여 "
+            "연면적 대비 에너지 효율을 개선해야 합니다."
+        )
+    if not pd.isna(rank_share) and rank_share <= 5:
+        suggestions.append(
+            "• 공단 전체 목표 달성에 미치는 영향이 큰 기관으로, "
+            "피크타임 절감 및 자동제어 강화가 요구됩니다."
+        )
+    if not suggestions:
+        suggestions.append(
+            "• 현재 수준을 유지하면서 에너지 절감 잠재 영역을 "
+            "지속적으로 발굴하는 것이 필요합니다."
+        )
+
+    lines: list[str] = []
+    lines.append(f"#### ▶ {org_name}")
+    lines.append("**1) 에너지 사용 요약**")
+    lines.append(f"- 연면적 대비 사용량: {_fmt_pct(upa)}")
+    lines.append(f"- 3개년 평균 대비 증감률: {_fmt_pct(vs3)}")
+    lines.append(f"- 에너지 사용 비중 순위: {rank_text}")
+    lines.append("")
+    lines.append("자동 문구:")
+    lines.append(
+        "> 최근 3개년 평균 대비 에너지 사용량이 "
+        f"**{trend_word}** 추세를 보이고 있으며, "
+        f"연면적 대비 사용량은 {level_word}입니다."
+    )
+    lines.append("")
+    lines.append("**2) 기관 맞춤형 제안**")
+    lines.extend(suggestions)
+
+    return "\n".join(lines)
+
+
+def generate_common_recommendations_text(
+    df3_by_org: pd.DataFrame,
+    data2_by_org: pd.DataFrame,
+) -> str:
+    """공단 공통 제안 텍스트 생성"""
+
+    targets: list[str] = []
+    if "에너지 사용량 관리 대상" in df3_by_org.columns:
+        targets = list(
+            df3_by_org[df3_by_org["에너지 사용량 관리 대상"] == "O"].index
+        )
+
+    lines: list[str] = []
+    lines.append(
+        "다음 제안은 공단 전체 기관에 공통으로 적용할 수 있는 "
+        "에너지 절감 방향입니다.\n"
+    )
+    lines.append(
+        "- 설비 노후가 의심되는 기관(관리대상 및 면적대비 사용량 상위 기관)을 "
+        "**우선 대상으로** 고효율 설비 교체 로드맵을 수립합니다."
+    )
+    lines.append(
+        "- 보훈병원 및 보훈요양원 등 상시 운영시설에는 "
+        "**BEMS(건물 에너지 관리 시스템)** 적용 및 데이터 기반 모니터링을 확대합니다."
+    )
+    lines.append(
+        "- 전 기관을 대상으로 **대기전력 절감 캠페인, 불필요 조명 소등, "
+        "설정온도 표준화** 등을 정착시킵니다."
+    )
+    if targets:
+        lines.append(
+            f"- 에너지 사용량 관리 대상 기관({', '.join(targets)})은 "
+            "월별 사용량을 집중 모니터링하고, 현장 점검과 절감 컨설팅을 "
+            "우선 지원합니다."
+        )
+    else:
+        lines.append(
+            "- 현재 관리대상으로 분류된 기관은 없으나, 사용량 추세를 주기적으로 "
+            "점검하여 이상징후를 조기에 발견할 필요가 있습니다."
+        )
+
+    return "\n".join(lines)
+
+
+# ===========================================================
 # 📊 대시보드 탭 렌더링 (에너지 사용량 분석 + 피드백)
 # ===========================================================
 def render_dashboard_tab(
@@ -650,23 +901,65 @@ def render_dashboard_tab(
         summary_text = "* 종합분석 정보를 불러오는 중 오류가 발생했습니다."
 
     # (2) 에너지 절감을 위한 제안 (고정 텍스트 – GPT 판단 기반 템플릿)
-    ai_suggestion = "\n".join(
-        [
-            "* 옥상·외벽 등 주요 외피의 단열 성능을 점검하고, 필요 시 단계적으로 보완하여 난방·냉방 부하를 줄입니다.",
-            "* 중앙보훈병원, 요양원 등 상시 가동 시설에는 온도·조도·점등을 자동 제어하는 BEMS(건물에너지관리시스템) 도입·확대를 검토합니다.",
-            "* 야간·휴일 비상설비 및 대기전력(PC, 복합기, 냉장고 등)을 집중 관리하는 ‘대기전력 차단 캠페인’을 시행합니다.",
-            "* 에너지 사용량이 빠르게 증가한 기관을 대상으로 원인 진단(증축, 장비 교체, 운영시간 변경 등)을 실시하고, 기관별 맞춤 절감 목표를 재설정합니다.",
-            "* 노후 보일러·냉동기·조명 등 에너지 다소비 설비는 고효율 인증 제품으로 교체하는 중장기 투자계획을 수립합니다.",
-            "* 직원 참여형 에너지 절감 프로그램(부서별 절감 실적 공개, 인센티브 부여 등)을 운영하여 자발적 참여를 유도합니다.",
-        ]
+    st.markdown("**1. 공단 전체 기준**")
+    st.dataframe(df3_overall_fmt, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("**2. 소속기구별**")
+    st.dataframe(df3_by_org_fmt, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
+    df3_detail = data3.detail.copy().reindex(org_order)
+    st.dataframe(df3_detail, use_container_width=True)
+
+    # ---------------------------------------------------
+    # 4. AI 제안 피드백 (자동 생성 텍스트)
+    # ---------------------------------------------------
+    st.markdown("---")
+    st.markdown("### AI 제안 피드백")
+
+    # (종합분석)
+    st.markdown("#### (종합분석)")
+    global_text = generate_global_feedback_text(
+        selected_year=selected_year,
+        df3_overall=data3.overall,
+        data2_overall=data2_overall,
+        data2_by_org=data2_by_org,
+        df3_by_org=df3_by_org,
+    )
+    st.markdown(global_text)
+
+    # 소속기구별 맞춤형 피드백
+    st.markdown("---")
+    st.markdown("#### [소속기구별 맞춤형 피드백]")
+
+    upa_mean = data2_by_org["면적대비 에너지 사용비율"].mean()
+    total_orgs = len(data2_by_org)
+
+    for org in data2_by_org.index:
+        row2 = data2_by_org.loc[org]
+        row3 = df3_by_org.loc[org]
+        inst_text = generate_institution_feedback_text(
+            org_name=org,
+            row2=row2,
+            row3=row3,
+            upa_mean=upa_mean,
+            total_orgs=total_orgs,
+        )
+        st.markdown(inst_text)
+        st.markdown("")
+
+    # 공단 공통 제안
+    st.markdown("---")
+    st.markdown("#### [에너지 절감을 위한 공단 공통 제안]")
+    st.markdown(
+        generate_common_recommendations_text(
+            df3_by_org=df3_by_org,
+            data2_by_org=data2_by_org,
+        )
     )
 
-    st.markdown("**(종합분석)**")
-    st.markdown(summary_text)
-
-    st.markdown("")
-    st.markdown("**(에너지 절감을 위한 제안)**")
-    st.markdown(ai_suggestion)
 
 
 # ===========================================================
