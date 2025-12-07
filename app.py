@@ -9,6 +9,7 @@ from typing import Dict, Mapping, Optional
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt  # 원그래프(파이 차트)용
 
 # ===========================================================
 # 내부 모듈 import (오류 발생 시 화면에 표시)
@@ -138,6 +139,52 @@ def format_table(
         df_fmt[col] = df_fmt[col].apply(lambda x: format_number(x, rule))
 
     return df_fmt
+
+
+# ===========================================================
+# 원그래프(파이 차트) 유틸
+# ===========================================================
+def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False) -> None:
+    """기관별 값을 받아 원그래프를 그려준다.
+
+    - use_abs=True: 음수 값 가능 지표는 절대값으로 비교 (예: 증감률)
+    - 값이 모두 0/NaN 이면 안내만 출력
+    """
+    if series is None or series.empty:
+        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
+        return
+
+    s = series.dropna()
+    if s.empty:
+        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
+        return
+
+    if use_abs:
+        s = s.abs()
+
+    # 0 이하 값은 제외 (파이 차트 특성상 음수/0 불가)
+    s = s[s > 0]
+    if s.empty:
+        st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
+        return
+
+    # 너무 많은 조각이 생기지 않도록 상위 10개 + 기타
+    s = s.sort_values(ascending=False)
+    if len(s) > 10:
+        top = s.iloc[:10]
+        others = s.iloc[10:].sum()
+        top["기타"] = others
+        s = top
+
+    labels = s.index.astype(str).tolist()
+    values = s.values
+
+    fig, ax = plt.subplots()
+    ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+    ax.axis("equal")
+    ax.set_title(title)
+    st.pyplot(fig)
+    plt.close(fig)
 
 
 # ===========================================================
@@ -395,6 +442,38 @@ def render_dashboard_tab(
             st.info("시설구분별 데이터가 없습니다.")
 
     st.markdown("---")
+
+    # -------------------------------------------------------
+    # 1-1. 소속기구별 분석 원그래프 (에너지 분석 부문)
+    # -------------------------------------------------------
+    st.markdown("**소속기구별 원그래프 (에너지 분석 부문)**")
+
+    if data2_by_org is None or data2_by_org.empty or len(data2_by_org.index) < 2:
+        st.info("소속기구별 비교를 위한 데이터가 2개 미만입니다.")
+    else:
+        pie_metrics = [
+            ("에너지 사용량", "에너지 사용량", False),
+            ("면적대비 에너지 사용비율", "면적대비 에너지 사용비율", False),
+            ("에너지 사용 비중", "에너지 사용 비중", False),
+            ("3개년 평균 에너지 사용량 대비 증감률", "3개년 평균 에너지 사용량 대비 증감률", True),
+            ("시설별 평균 면적 대비 에너지 사용비율", "시설별 평균 면적 대비 에너지 사용비율", False),
+        ]
+
+        # 2개씩 좌우 분할
+        for i in range(0, len(pie_metrics), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                if i + j >= len(pie_metrics):
+                    break
+                title_kor, col_name, use_abs = pie_metrics[i + j]
+                with cols[j]:
+                    if col_name in data2_by_org.columns:
+                        series = data2_by_org[col_name]
+                        render_pie_from_series(series, title_kor, use_abs=use_abs)
+                    else:
+                        st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
+
+    st.markdown("---")
     st.markdown("**2. 소속기구별 분석**")
     st.dataframe(df2_by_org_fmt, use_container_width=True)
 
@@ -433,6 +512,8 @@ def render_dashboard_tab(
     df3_by_org = data3.by_org.copy()
     df3_detail = data3.detail.copy()
 
+    org_order = list(get_org_order())
+
     if view_mode == "공단 전체":
         df3_by_org = df3_by_org.reindex(org_order)
         df3_detail = df3_detail.reindex(org_order)
@@ -457,6 +538,36 @@ def render_dashboard_tab(
 
     st.markdown("---")
     st.markdown("**2. 소속기구별**")
+
+    # -------------------------------------------------------
+    # 2-1. 사용 분포 순위 원그래프 (에너지 3개년 평균 증가 순위 / 평균 에너지 사용량(연면적 기준) 순위)
+    # -------------------------------------------------------
+    if df3_by_org is None or df3_by_org.empty or len(df3_by_org.index) < 2:
+        st.info("순위 비교를 위한 데이터가 2개 미만입니다.")
+    else:
+        st.markdown("**소속기구별 원그래프 (사용 분포 순위)**")
+
+        rank_metrics = [
+            ("에너지 3개년 평균 증가 순위", "에너지 3개년 평균 증가 순위"),
+            ("평균 에너지 사용량(연면적 기준) 순위", "평균 에너지 사용량(연면적 기준) 순위"),
+        ]
+
+        cols = st.columns(2)
+        for idx, (title_kor, col_name) in enumerate(rank_metrics):
+            with cols[idx]:
+                if col_name in df3_by_org.columns:
+                    rank_series = df3_by_org[col_name].dropna()
+                    if rank_series.empty:
+                        st.info(f"'{col_name}' 데이터가 없습니다.")
+                    else:
+                        # 순위는 숫자가 작을수록 상위이므로,
+                        # (최대+1-순위)로 점수를 만들어 파이 비중에 사용
+                        max_rank = rank_series.max()
+                        score = (max_rank + 1) - rank_series
+                        render_pie_from_series(score, title_kor, use_abs=False)
+                else:
+                    st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
+
     st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
