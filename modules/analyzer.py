@@ -46,19 +46,28 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
             continue
         tmp = df.copy()
 
-        # 필수 컬럼 존재 여부 확인
+        # 1) 필수 컬럼 존재 여부 확인
         for col in required_cols:
             if col not in tmp.columns:
                 raise ValueError(
                     f"{year}년 df_raw에 '{col}' 컬럼이 없습니다. loader 단계에서 스키마를 확인해 주세요."
                 )
 
-        # 숫자 컬럼 정제
-        for col in ["연도", "연면적", "연단위"]:
+        # 2) 숫자 컬럼 정제
+        num_cols = ["연도", "연면적", "연단위"]
+        for col in num_cols:
             tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
-            if tmp[col].isna().any():
-                na_cnt = int(tmp[col].isna().sum())
-                raise ValueError(f"{year}년 데이터의 '{col}' 컬럼에 NaN / 잘못된 값이 {na_cnt}개 있습니다.")
+
+        # 3) 숫자 컬럼에 NaN 이 있는 행은 경고 후 분석에서 제외
+        na_mask = tmp[num_cols].isna().any(axis=1)
+        na_cnt = int(na_mask.sum())
+        if na_cnt > 0:
+            bad_rows = tmp.loc[na_mask, ["기관명", "연도", "연면적", "연단위"]]
+            _log_warning(
+                f"{year}년 df_raw에서 연도/연면적/연단위에 NaN 이 있는 행 {na_cnt}개를 분석에서 제외합니다.\n"
+                f"{bad_rows.to_string(index=False)}"
+            )
+            tmp = tmp.loc[~na_mask].copy()
 
         dfs.append(tmp)
 
