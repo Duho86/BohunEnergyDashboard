@@ -156,36 +156,48 @@ def _compute_overall_usage(
 
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
-    전체 공단의 면적당 사용량을 기준(1.0)으로 두고,
-    시설구분별 면적당 사용량이 이 기준 대비 몇 배인지 계산한다.
+    시설구분별 '면적대비 에너지 사용비율' 평균을 계산한다.
+
+    엑셀 수식 기준:
+      - 각 기관별 면적대비 에너지 사용비율 E열 = (에너지 사용량 / 연면적)
+      - 의료/복지/기타 별로 E열을 AVERAGEIFS 로 평균
+
+    여기서도 동일하게:
+      1) 현재 연도 기준으로 기관별 사용량/연면적 계산
+      2) 기관의 시설구분(의료/복지/기타)별로 단순 평균
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
         raise ValueError(f"{current_year}년 데이터가 없습니다.")
 
-    total_area = float(df_year["연면적"].sum())
-    total_usage = float(df_year["연단위"].sum())
-    if total_area <= 0:
-        raise ValueError("공단 전체 연면적 합계가 0입니다.")
-
-    overall_upa = total_usage / total_area  # 공단 전체 면적당 사용량
-
-    grp = df_year.groupby("시설구분", dropna=False).agg(
-        usage_sum=("연단위", "sum"),
-        area_sum=("연면적", "sum"),
+    # 기관별 현재 연도 사용량 및 연면적
+    usage_by_org = df_year.groupby("기관명", dropna=False)["연단위"].sum()
+    area_by_org = df_year.groupby("기관명", dropna=False)["연면적"].max()
+    fac_type_by_org = df_year.groupby("기관명", dropna=False)["시설구분"].agg(
+        lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
     )
 
-    if (grp["area_sum"] == 0).any():
-        raise ValueError("시설구분별 연면적 합계가 0인 항목이 있습니다.")
+    if (area_by_org <= 0).any():
+        _log_warning("일부 기관에서 연면적이 0 이하입니다. 면적대비 사용비율 계산에서 제외됩니다.")
+        valid_mask = area_by_org > 0
+        usage_by_org = usage_by_org[valid_mask]
+        area_by_org = area_by_org[valid_mask]
+        fac_type_by_org = fac_type_by_org[valid_mask]
 
-    grp["usage_per_area_ratio"] = (
-        (grp["usage_sum"] / grp["area_sum"]) / overall_upa
+    # 기관별 면적대비 사용비율 (E열에 해당)
+    upa_org = usage_by_org / area_by_org
+
+    df_org = pd.DataFrame(
+        {
+            "시설구분": fac_type_by_org,
+            "면적대비 에너지 사용비율": upa_org,
+        }
     )
+
+    grp = df_org.groupby("시설구분", dropna=False)["면적대비 에너지 사용비율"].mean()
 
     def get_value(ftype: str) -> float:
-        if ftype not in grp.index:
-            return float("nan")
-        return float(grp.loc[ftype, "usage_per_area_ratio"])
+        return float(grp.get(ftype, np.nan))
 
     return pd.Series(
         {
@@ -281,13 +293,14 @@ def _compute_org_level_current_metrics(
     # 증감률 (cur - avg3) / avg3
     vs3 = (usage_cur - avg3) / avg3.replace(0, np.nan)
 
-    # 면적당 사용량
+    # 면적당 사용량 (C/D)
     upa = usage_cur / area_by_org.replace(0, np.nan)
 
     total_cur = float(usage_cur.sum())
     if total_cur == 0:
         raise ValueError("현재연도 전체 사용량 합계가 0입니다.")
 
+    # 에너지 사용 비중 (F열)
     share = usage_cur / total_cur
 
     df_org = pd.DataFrame(
@@ -376,8 +389,10 @@ def _compute_overall_feedback(
     if avg3 == 0:
         raise ValueError("3개년 평균 사용량이 0입니다.")
 
+    # 엑셀: 권장 에너지 사용량 = 현재 사용량 * (1 - ndc_rate)
     recommended = cur * (1.0 - ndc_rate)
-    reduction_yoy = -ndc_rate
+    reduction_yoy = -ndc_rate  # 전년대비 감축률(목표값)
+    # 3개년 대비 감축률 = (권장량 - 3개년 평균) / 3개년 평균
     reduction_vs3 = (recommended - avg3) / avg3
 
     return pd.Series(
@@ -396,28 +411,37 @@ def _compute_org_recommended_and_flags(
     """
     org_level_recommended_usage_and_flags + 상세 관리대상 표 생성.
 
-    management_flag 규칙:
-      - 조건1: usage_vs_recommended > 1
-      - 조건2: usage_per_area > 전체 기관 평균 usage_per_area
-      - 최종: 조건1 OR 조건2
+    엑셀 기준:
+      - 사용 분포 순위: 에너지 사용 비중(F열)을 기준으로 RANK.AVG
+      - 에너지 3개년 평균 증가 순위: 3개년 평균 대비 증감률(G열) 기준 RANK.AVG
+      - 평균 에너지 사용량(연면적 기준) 순위: 면적대비 사용비율(E열) 기준 RANK.AVG
+      - 권장 에너지 사용량: 현재 사용량 * (1 - ndc_rate)
+      - 권장 사용량 대비 에너지 사용 비율: 현재 사용량 / 권장 사용량
+      - 에너지 사용량 관리 대상(O/X):
+          OR(면적대비 사용비율 > 전체 평균,
+             3개년 평균 대비 증감률 > 전체 평균,
+             권장비율 > 전체 평균)
+      - 상세 표:
+          면적대비 에너지 과사용                : 위의 첫 번째 조건
+          에너지 사용량 급증(3개년 평균대비)     : 두 번째 조건
+          권장량 대비 에너지 사용량 매우 초과     : 세 번째 조건
     """
     ndc_rate: float = float(spec["meta"]["ndc_target_rate"])
 
     # df_org_metrics 는 _compute_org_level_current_metrics 결과
     cur_usage = df_org_metrics["에너지 사용량"]
+    share = df_org_metrics["에너지 사용 비중"]
+    upa = df_org_metrics["면적대비 에너지 사용비율"]
+    growth_rate = df_org_metrics["3개년 평균 에너지 사용량 대비 증감률"]
 
+    # 권장 사용량 및 비율
     recommended = cur_usage * (1.0 - ndc_rate)
     usage_vs_recommended = cur_usage / recommended.replace(0, np.nan)
 
-    # 3개년 평균 대비 성장률은 metrics 에서 계산된 값을 그대로 사용
-    growth_rate = df_org_metrics["3개년 평균 에너지 사용량 대비 증감률"]
-
-    # 순위 계산 (내림차순, 1등이 가장 큰 값) – float 그대로 유지
-    rank_by_usage = cur_usage.rank(ascending=False, method="min")
-    rank_by_growth = growth_rate.rank(ascending=False, method="min")
-    rank_by_upa = df_org_metrics["면적대비 에너지 사용비율"].rank(
-        ascending=False, method="min"
-    )
+    # 순위 계산 (엑셀 RANK.AVG와 동일하게 내림차순, 동순위 동일 순위)
+    rank_by_usage = share.rank(ascending=False, method="average")
+    rank_by_growth = growth_rate.rank(ascending=False, method="average")
+    rank_by_upa = upa.rank(ascending=False, method="average")
 
     # NaN 순위는 0으로 표기
     if (
@@ -431,14 +455,17 @@ def _compute_org_recommended_and_flags(
     rank_by_growth_val = rank_by_growth.fillna(0.0)
     rank_by_upa_val = rank_by_upa.fillna(0.0)
 
-    # management_flag: 조건1 OR 조건2
-    upa = df_org_metrics["면적대비 에너지 사용비율"]
-    upa_mean = upa.mean()
+    # 관리 대상 플래그용 기준값 (전체 평균)
+    upa_mean_overall = float(upa.mean())
+    growth_mean_overall = float(growth_rate.mean())
+    uv_mean_overall = float(usage_vs_recommended.mean())
 
-    cond1 = usage_vs_recommended > 1.0
-    cond2 = upa > upa_mean
-    flag_series = (cond1.fillna(False) | cond2.fillna(False)).astype(bool)
-    flag_text = flag_series.map(lambda x: "O" if x else "X")
+    cond_area = upa > upa_mean_overall
+    cond_growth = growth_rate > growth_mean_overall
+    cond_uv = usage_vs_recommended > uv_mean_overall
+
+    management_flag = (cond_area | cond_growth | cond_uv).fillna(False)
+    flag_text = management_flag.map(lambda x: "O" if x else "X")
 
     df_by_org = pd.DataFrame(
         {
@@ -452,16 +479,17 @@ def _compute_org_recommended_and_flags(
         index=df_org_metrics.index,
     )
 
-    # 상세 관리대상 표
-    detail_cols: Dict[str, pd.Series] = {}
-    detail_cols["면적대비 에너지 과사용"] = upa > upa_mean
-    detail_cols["에너지 사용량 급증(3개년 평균대비)"] = growth_rate > 0
-    detail_cols["권장량 대비 에너지 사용량 매우 초과"] = usage_vs_recommended > 1.0
-
+    # 상세 관리대상 표 (각 조건별 O/X)
     df_detail = pd.DataFrame(index=df_org_metrics.index)
-    for col_name, cond in detail_cols.items():
-        cond_bool = cond.fillna(False).astype(bool)
-        df_detail[col_name] = cond_bool.map(lambda x: "O" if x else "X")
+    df_detail["면적대비 에너지 과사용"] = cond_area.fillna(False).map(
+        lambda x: "O" if x else "X"
+    )
+    df_detail["에너지 사용량 급증(3개년 평균대비)"] = cond_growth.fillna(False).map(
+        lambda x: "O" if x else "X"
+    )
+    df_detail["권장량 대비 에너지 사용량 매우 초과"] = cond_uv.fillna(False).map(
+        lambda x: "O" if x else "X"
+    )
 
     return df_by_org, df_detail
 
