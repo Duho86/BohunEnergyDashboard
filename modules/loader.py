@@ -1,357 +1,327 @@
-"""
-modules/loader.py
-
-에너지 사용량 백데이터 엑셀을 읽어서
-표준 원시데이터(df_raw)를 만드는 모듈.
-
-app.py에서 기대하는 공개 함수
-- load_spec()
-- load_energy_files(year_to_file)
-- get_org_order(df_raw_all)
-"""
-
 from __future__ import annotations
 
-import io
 import json
+import re
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Tuple, List, Any
+from typing import Dict, Iterable, Mapping, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
+try:
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # type: ignore[assignment]
 
-# =========================
-# 경로 / 공통 유틸
-# =========================
+# ===========================================================
+# 경로 / 로그 유틸
+# ===========================================================
 
-THIS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = THIS_DIR.parent  # app.py, schema.json 등이 있는 위치라고 가정
-
-
-def _load_json(name: str) -> Any:
-    """
-    프로젝트 루트에 있는 JSON 파일을 읽어온다.
-    - schema.json
-    - formulas.json
-    - rules_template.json
-    """
-    path = PROJECT_ROOT / name
-    if not path.exists():
-        raise FileNotFoundError(f"JSON 파일을 찾을 수 없습니다: {path}")
-    # UTF-8, CP949 모두 시도 (로컬 저장 인코딩에 따라 다를 수 있음)
-    for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr"):
-        try:
-            with open(path, "r", encoding=enc) as f:
-                return json.load(f)
-        except UnicodeDecodeError:
-            continue
-    # 그래도 안 되면 바이너리로 읽어서 cp949로 강제 디코딩 시도
-    with open(path, "rb") as f:
-        raw = f.read()
-    return json.loads(raw.decode("cp949", errors="replace"))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-# =========================
-# 1) 스펙 로딩
-# =========================
-
-def load_spec():
-    """
-    엑셀 원본에서 추출해 둔 메타데이터(스키마/수식/룰 템플릿)를 불러온다.
-    analyzer 모듈에서 그대로 사용하도록 (schema, formulas, rules_template)를 튜플로 반환한다.
-    """
-    schema = _load_json("schema.json")
-    formulas = _load_json("formulas.json")
-    rules_template = _load_json("rules_template.json")
-    return schema, formulas, rules_template
-
-
-# =========================
-# 2) df_raw 표준 스키마 정의
-# =========================
-
-DF_RAW_COLUMNS = [
-    "연도",            # int
-    "진행상태",        # 작성중 / 확정 등
-    "사업군",          # 본사 / 의료 / 복지 ...
-    "소속기관명",      # 중앙보훈병원 / 부산보훈병원 ...
-    "연면적/설비용량", # float
-    "시설구분",        # 건물 / 차량 등
-    "연료",            # 전기 / 가스(LNG) / 지역난방 / 등유 / LPG ...
-    "단위",            # kWh / ㎥ / Gcal ...
-    "담당자",          # 이름
-    # 월별 사용량
-    "1월",
-    "2월",
-    "3월",
-    "4월",
-    "5월",
-    "6월",
-    "7월",
-    "8월",
-    "9월",
-    "10월",
-    "11월",
-    "12월",
-    # 연간 합계 / 온실가스
-    "연간사용량",
-    "온실가스환산량_tCO2eq",
-    "면적당온실가스배출량",
-]
-
-
-def _coerce_numeric(series: pd.Series) -> pd.Series:
-    """문자/공백/콤마가 섞인 숫자 컬럼을 안전하게 float로 변환."""
-    return (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.strip()
-        .replace({"": None, "nan": None, "None": None})
-        .astype(float)
-    )
-
-
-# =========================
-# 3) 개별 파일 → 단일 연도 df_raw 변환
-# =========================
-
-def _guess_sheet_name_for_year(xls: pd.ExcelFile, year: int) -> str:
-    """
-    업로드된 엑셀 파일에서 백데이터 시트명을 추정한다.
-    우선순위:
-    1) f"(백데이터){year}년"
-    2) f"(백데이터){str(year)[-2:]}년"
-    3) 이름에 "백데이터"가 포함된 첫 번째 시트
-    4) 첫 번째 시트 (최후 fallback)
-    """
-    candidates = list(xls.sheet_names)
-
-    # 1, 2) 정확/축약 표기 매칭
-    exact1 = f"(백데이터){year}년"
-    exact2 = f"(백데이터){str(year)[-2:]}년"
-    if exact1 in candidates:
-        return exact1
-    if exact2 in candidates:
-        return exact2
-
-    # 3) '백데이터'를 이름에 포함하는 첫 시트
-    for name in candidates:
-        if "백데이터" in name:
-            return name
-
-    # 4) 그래도 없으면 첫 시트
-    return candidates[0]
-
-
-def _load_single_year_from_excel(file_obj, year: int) -> pd.DataFrame:
-    """
-    (백데이터)YYYY년 시트를 읽어서 표준 df_raw 구조로 변환한다.
-
-    엑셀 시트의 컬럼 구조 (왼쪽에서 오른쪽 순서 기준, 0부터 인덱스):
-    0: 진행상태
-    1: 사업군
-    2: 소속기관명
-    3: 연면적/설비용량
-    4: 시설구분
-    5: 연료
-    6: 단위
-    7: 담당자
-    8~19: 1~12월 사용량
-    20: 연간사용량 (연단위)
-    21: 온실가스 환산량 (tCO2eq)
-    22: 면적당 온실가스 배출량
-
-    ※ 엑셀 헤더는 실제로는 모두 '시설내역', '에너지사용량' 등 중복 이름이지만,
-       위치(index) 기준으로 의미를 해석한다.
-    """
-    # Streamlit UploadedFile 객체이든, 경로이든 모두 지원
-    # pd.ExcelFile이 파일 핸들을 한 번 더 감쌀 수 있어서,
-    # 바이너리 버퍼로 통일 처리
-    if hasattr(file_obj, "read"):
-        # Streamlit UploadedFile 처럼 .read()가 있는 경우
-        data = file_obj.read()
-        # 이후 analyzer 등에서 다시 read 할 수 있도록 포인터 초기화
-        try:
-            file_obj.seek(0)
-        except Exception:
-            pass
-        buffer = io.BytesIO(data)
+def _log_error(msg: str) -> None:
+    if st is not None:
+        st.error(msg)
     else:
-        # 파일 경로 문자열로 들어온 경우
-        buffer = file_obj
+        print(f"[ERROR] {msg}")
 
-    xls = pd.ExcelFile(buffer)
-    sheet_name = _guess_sheet_name_for_year(xls, year)
 
-    # 헤더 위치를 자동으로 찾기보다, 가장 윗줄부터 읽고
-    # 첫 행을 헤더로 사용한 뒤 위치기반으로 해석
-    df_raw_sheet = pd.read_excel(
-        xls,
-        sheet_name=sheet_name,
-        header=0,
-        dtype=str  # 일단 모두 문자열로 읽어서 나중에 형 변환
+def _log_warning(msg: str) -> None:
+    if st is not None:
+        st.warning(msg)
+    else:
+        print(f"[WARN] {msg}")
+
+
+def _find_spec_path(spec_path: Optional[Union[str, Path]] = None) -> Path:
+    """master_energy_spec.json 위치를 여러 후보 경로에서 순차적으로 탐색한다."""
+    candidates = []
+
+    if spec_path is not None:
+        candidates.append(Path(spec_path))
+
+    cwd = Path.cwd()
+
+    candidates.extend(
+        [
+            PROJECT_ROOT / "data" / "master_energy_spec.json",
+            PROJECT_ROOT / "master_energy_spec.json",
+            cwd / "data" / "master_energy_spec.json",
+            cwd / "master_energy_spec.json",
+        ]
     )
 
-    # 불필요한 완전 빈 행 제거
-    df_raw_sheet = df_raw_sheet.dropna(how="all")
-    if df_raw_sheet.empty:
-        return pd.DataFrame(columns=DF_RAW_COLUMNS)
+    for p in candidates:
+        if p.is_file():
+            return p
 
-    # 컬럼 수가 23 미만이면 잘못된 파일로 간주하고 빈 DF 반환
-    if df_raw_sheet.shape[1] < 23:
-        return pd.DataFrame(columns=DF_RAW_COLUMNS)
+    detail = "시도한 경로들:\n" + "\n".join(str(c) for c in candidates)
+    _log_error(detail)
+    raise FileNotFoundError("사양 파일을 찾지 못했습니다: master_energy_spec.json")
 
-    # 위치 인덱스 → 의미있는 이름으로 매핑
-    meta_cols = df_raw_sheet.iloc[:, 0:8].copy()
-    usage_monthly = df_raw_sheet.iloc[:, 8:20].copy()
-    summary_cols = df_raw_sheet.iloc[:, 20:23].copy()
 
-    meta_cols.columns = [
-        "진행상태",
-        "사업군",
-        "소속기관명",
-        "연면적/설비용량",
-        "시설구분",
-        "연료",
-        "단위",
-        "담당자",
-    ]
-    usage_monthly.columns = [f"{m}월" for m in range(1, 13)]
-    summary_cols.columns = ["연간사용량", "온실가스환산량_tCO2eq", "면적당온실가스배출량"]
+@lru_cache(maxsize=1)
+def load_spec(spec_path: Optional[Union[str, Path]] = None) -> dict:
+    """master_energy_spec.json을 로드해서 dict로 반환한다."""
+    path = _find_spec_path(spec_path)
+    with path.open("r", encoding="utf-8") as f:
+        spec = json.load(f)
+    return spec
 
-    df = pd.concat([meta_cols, usage_monthly, summary_cols], axis=1)
 
-    # 합계 / 빈 행 제거
-    mask_sum = (
-        df["사업군"].astype(str).str.contains("합계", na=False)
-        | df["소속기관명"].astype(str).str.contains("합계", na=False)
+# ===========================================================
+# 기관명 순서 (사용자 지정 19개 기관)
+# ===========================================================
+
+ORG_ORDER: Tuple[str, ...] = (
+    "본사",
+    "중앙보훈병원",
+    "부산보훈병원",
+    "광주보훈병원",
+    "대구보훈병원",
+    "대전보훈병원",
+    "인천보훈병원",
+    "보훈교육연구원",
+    "보훈원",
+    "수원보훈요양원",
+    "광주보훈요양원",
+    "김해보훈요양원",
+    "대구보훈요양원",
+    "대전보훈요양원",
+    "남양주보훈요양원",
+    "원주보훈요양원",
+    "전주보훈요양원",
+    "보훈재활체육센터",
+    "보훈휴양원",
+)
+
+
+def get_org_order() -> Tuple[str, ...]:
+    """모든 표·필터에서 사용할 표준 기관명 순서를 반환."""
+    return ORG_ORDER
+
+
+# ===========================================================
+# 기관별 시설군(의료/복지/기타) 매핑
+# ===========================================================
+
+ORG_FACILITY_GROUP: Dict[str, str] = {
+    # 의료시설
+    "중앙보훈병원": "의료시설",
+    "부산보훈병원": "의료시설",
+    "광주보훈병원": "의료시설",
+    "대구보훈병원": "의료시설",
+    "대전보훈병원": "의료시설",
+    "인천보훈병원": "의료시설",
+    # 복지시설 (요양원)
+    "수원보훈요양원": "복지시설",
+    "광주보훈요양원": "복지시설",
+    "김해보훈요양원": "복지시설",
+    "대구보훈요양원": "복지시설",
+    "대전보훈요양원": "복지시설",
+    "남양주보훈요양원": "복지시설",
+    "원주보훈요양원": "복지시설",
+    "전주보훈요양원": "복지시설",
+    # 기타시설
+    "본사": "기타시설",
+    "보훈교육연구원": "기타시설",
+    "보훈원": "기타시설",
+    "보훈재활체육센터": "기타시설",
+    "보훈휴양원": "기타시설",
+}
+
+
+# ===========================================================
+# 엑셀 컬럼 정규화/검사 유틸
+# ===========================================================
+
+# 소속기관명/기관명 계열 후보
+ORG_COL_CANDIDATES = ["소속기관명", "기관명", "소속기관", "소속기구"]
+# 연면적/설비용량 계열 후보
+AREA_COL_CANDIDATES = ["연면적/설비용량", "연면적", "연면적(㎡)"]
+# 연간 사용량 계열 후보
+ANNUAL_USAGE_COL_CANDIDATES = ["연단위", "연간사용량", "연간 사용량"]
+# 시설구분은 이름이 거의 고정
+FACILITY_TYPE_COL = "시설구분"
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """헤더 공백/개행 제거 등 최소 정규화."""
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.replace("\n", "", regex=False)
     )
-    mask_empty = df["연간사용량"].astype(str).str.strip().isin(["", "nan", "None"])
-    df = df[~(mask_sum | mask_empty)].copy()
+    return df
 
-    # 숫자형 컬럼 변환
-    numeric_cols = (
-        ["연면적/설비용량"]
-        + [f"{m}월" for m in range(1, 13)]
-        + ["연간사용량", "온실가스환산량_tCO2eq", "면적당온실가스배출량"]
+
+def _find_first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> str:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise ValueError(
+        f"필수 컬럼을 찾을 수 없습니다. 후보: {list(candidates)}, 현재 컬럼: {list(df.columns)}"
     )
-    for c in numeric_cols:
-        df[c] = _coerce_numeric(df[c])
-
-    # 연도 컬럼 추가 및 정렬
-    df.insert(0, "연도", int(year))
-
-    # 최종 컬럼 순서 강제
-    df = df.reindex(columns=DF_RAW_COLUMNS)
-
-    return df.reset_index(drop=True)
 
 
-# =========================
-# 4) 여러 연도 파일 로딩
-# =========================
+# ===========================================================
+# 파일명 → 연도
+# ===========================================================
 
-def load_energy_files(year_to_file: Dict[int, Any]) -> Tuple[pd.DataFrame, Dict[int, pd.DataFrame]]:
+
+def infer_year_from_filename(name: str) -> Optional[int]:
+    """파일명에서 연도(20xx)를 추출한다."""
+    m = re.search(r"(20[0-9]{2})", name)
+    if not m:
+        return None
+    y = int(m.group(1))
+    if 2000 <= y <= 2100:
+        return y
+    return None
+
+
+def discover_local_energy_files() -> Dict[int, Path]:
+    """PROJECT_ROOT/data 에서 연도 정보를 가진 엑셀 파일을 찾아 {연도: 경로} 매핑 생성."""
+    data_dir = PROJECT_ROOT / "data"
+    mapping: Dict[int, Path] = {}
+    if not data_dir.is_dir():
+        return mapping
+
+    for p in data_dir.glob("*.xlsx"):
+        y = infer_year_from_filename(p.name)
+        if y is None:
+            continue
+        mapping.setdefault(y, p)
+    return mapping
+
+
+def get_year_to_file() -> Dict[int, object]:
+    """로컬(data/) + 세션 업로드 파일을 합쳐 {연도: 파일객체} 매핑 반환."""
+    local = discover_local_energy_files()
+    session_files: Dict[int, object] = (
+        st.session_state.get("year_to_file", {}) if st is not None else {}
+    )
+
+    merged: Dict[int, object] = {}
+    merged.update(local)
+    merged.update(session_files)
+    return merged
+
+
+# ===========================================================
+# 엑셀 → df_raw 변환
+# ===========================================================
+
+
+def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
+    """연도별 엑셀 시트를 df_raw 형식으로 변환한다.
+
+    입력 엑셀(현재 템플릿 예시):
+      - 소속기관명
+      - 시설내역
+      - 연면적/설비용량
+      - 시설구분
+      - 1월~12월
+      - 연단위
+      - 온실가스 환산량(tco2eq)
+      - 면적당 온실가스 배출량
+
+    출력 df_raw:
+      - 연도, year
+      - 기관명, org_name  (소속기관명과 동일)
+      - 시설구분 (의료시설/복지시설/기타시설로 재매핑)
+      - 연면적
+      - 연단위  (연간 에너지 사용량)
     """
-    app.py에서 사용하는 엔트리 포인트.
+    if df_original is None or df_original.empty:
+        raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
 
-    Parameters
-    ----------
-    year_to_file : dict[int, UploadedFile 또는 경로]
-        {연도: 업로드된 엑셀 파일} 매핑.
+    # 헤더/컬럼 정규화
+    df = _normalize_columns(df_original)
 
-    Returns
-    -------
-    df_raw_all : pd.DataFrame
-        여러 연도 파일을 모두 합친 df_raw.
-    year_to_raw : dict[int, pd.DataFrame]
-        연도별 개별 df_raw.
-    """
-    all_dfs: List[pd.DataFrame] = []
+    # 핵심 컬럼 이름 탐색 (후보 중 존재하는 것 사용)
+    org_col = _find_first_existing_column(df, ORG_COL_CANDIDATES)
+    area_col = _find_first_existing_column(df, AREA_COL_CANDIDATES)
+    annual_col = _find_first_existing_column(df, ANNUAL_USAGE_COL_CANDIDATES)
+
+    if FACILITY_TYPE_COL not in df.columns:
+        raise ValueError(
+            f"필수 컬럼 '{FACILITY_TYPE_COL}'(시설구분)을 찾을 수 없습니다. "
+            f"현재 컬럼: {list(df.columns)}"
+        )
+
+    # 기관명
+    org_series = df[org_col].astype(str).str.strip()
+
+    # 원본 시설구분(엑셀 값) – 필요 시 디버그용
+    facility_type_raw = df[FACILITY_TYPE_COL].astype(str).str.strip()
+
+    # 연면적: 숫자화 후, 같은 기관 내 NaN 은 해당 기관의 최대값(보통 전기 줄)을 사용
+    area_raw = pd.to_numeric(df[area_col], errors="coerce")
+    area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max()))
+
+    # 연간 사용량(연단위)
+    annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
+
+    # 기관명 → 시설군(의료/복지/기타) 매핑
+    org_unique = set(org_series.unique())
+    unknown_orgs = sorted(org_unique.difference(ORG_FACILITY_GROUP.keys()))
+    if unknown_orgs:
+        # 매핑 안 된 기관은 기타시설로 처리하되, 한 번 경고
+        _log_warning(
+            "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
+            + ", ".join(unknown_orgs)
+        )
+
+    facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
+
+    # df_raw 구성
+    df_raw = pd.DataFrame(
+        {
+            "연도": int(year),
+            "year": int(year),
+            "기관명": org_series,
+            "org_name": org_series,
+            "시설구분": facility_group,
+            "연면적": area,
+            "연단위": annual_usage,
+        }
+    )
+
+    return df_raw
+
+
+def load_energy_files(
+    year_to_file: Mapping[int, object],
+) -> Tuple[Dict[int, pd.DataFrame], pd.DataFrame]:
+    """연도별 엑셀 파일을 모두 읽어 df_raw_year / df_raw_all 생성."""
     year_to_raw: Dict[int, pd.DataFrame] = {}
+    df_list: list[pd.DataFrame] = []
 
-    for year, file_obj in sorted(year_to_file.items()):
-        if file_obj is None:
-            continue
+    for year in sorted(year_to_file.keys()):
+        file_obj = year_to_file[year]
         try:
-            df_year = _load_single_year_from_excel(file_obj, year)
-        except Exception:
-            # 특정 연도 파일 파싱 실패 시, 해당 연도만 건너뛰고 계속 진행
-            df_year = pd.DataFrame(columns=DF_RAW_COLUMNS)
+            # 엑셀 구조: 0행(보라색 제목), 1행이 실제 헤더이므로 header=1 지정
+            df_original = pd.read_excel(file_obj, sheet_name=0, header=1)
+        except Exception as e:
+            _log_error(f"{year}년 에너지 사용량 파일을 읽는 중 오류가 발생했습니다: {e}")
+            raise
 
-        if df_year is None or df_year.empty:
-            continue
+        try:
+            df_year = build_df_raw(df_original, year)
+        except Exception as e:
+            _log_error(f"{year}년 df_raw 생성 중 오류가 발생했습니다: {e}")
+            raise
 
         year_to_raw[year] = df_year
-        all_dfs.append(df_year)
+        df_list.append(df_year)
 
-    if all_dfs:
-        df_raw_all = pd.concat(all_dfs, ignore_index=True)
+    if df_list:
+        df_raw_all = pd.concat(df_list, ignore_index=True)
     else:
-        df_raw_all = pd.DataFrame(columns=DF_RAW_COLUMNS)
+        df_raw_all = pd.DataFrame()
 
-    return df_raw_all, year_to_raw
-
-
-# =========================
-# 5) 기관 정렬 정보
-# =========================
-
-def get_org_order(df_raw_all: pd.DataFrame):
-    """
-    화면 필터/테이블에서 사용할 기관 정렬 정보를 생성한다.
-
-    반환값 (app.py에서 기대하는 구조):
-    - org_type_to_orgs : dict[str, list[str]]
-        {사업군: [소속기관명 리스트]} 형태.
-        (예: {"본사": ["본사"], "의료": ["중앙보훈병원", "부산보훈병원", ...], ...})
-    - org_type_order : list[str]
-        사업군 표시 순서 (에너지 사용량 합계 기준 내림차순).
-    - org_to_order : dict[str, int]
-        소속기관명 전체에 대한 글로벌 정렬 인덱스 (차트/테이블 공통 정렬에 사용).
-    """
-    if df_raw_all is None or df_raw_all.empty:
-        return {}, [], {}
-
-    df = df_raw_all.copy()
-
-    # 기관별 연간 사용량 합계 (전 연료 합산)
-    usage_by_org = (
-        df.groupby(["사업군", "소속기관명"], dropna=False)["연간사용량"]
-        .sum(min_count=1)
-        .reset_index()
-    )
-
-    # 사업군 내 정렬 (기관별 사용량 내림차순)
-    usage_by_org = usage_by_org.sort_values(
-        by=["사업군", "연간사용량", "소속기관명"],
-        ascending=[True, False, True],
-        na_position="last",
-    )
-
-    org_type_to_orgs: Dict[str, List[str]] = {}
-    for row in usage_by_org.itertuples(index=False):
-        org_type = getattr(row, "사업군")
-        org_name = getattr(row, "소속기관명")
-        if pd.isna(org_type) or pd.isna(org_name):
-            continue
-        org_type_to_orgs.setdefault(org_type, []).append(org_name)
-
-    # 사업군별 총 사용량 → 표시 순서
-    usage_by_type = (
-        usage_by_org.groupby("사업군")["연간사용량"]
-        .sum(min_count=1)
-        .sort_values(ascending=False)
-    )
-    org_type_order = [t for t in usage_by_type.index if pd.notna(t)]
-
-    # 전체 기관에 대한 글로벌 정렬 인덱스
-    org_to_order: Dict[str, int] = {}
-    idx = 0
-    for org_type in org_type_order:
-        for org in org_type_to_orgs.get(org_type, []):
-            if org not in org_to_order:
-                org_to_order[org] = idx
-                idx += 1
-
-    return org_type_to_orgs, org_type_order, org_to_order
+    return year_to_raw, df_raw_all
