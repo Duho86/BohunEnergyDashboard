@@ -197,20 +197,13 @@ def _compute_org_level_current_metrics(
     df_all: pd.DataFrame,
     spec: dict,
     current_year: int,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.Series]:
     """
     2. 에너지 사용량 분석 – 소속기구별 표 전체를 계산한다.
 
-    - 에너지 사용량: 현재연도 사용량 합계
-    - 연면적: 현재연도 연면적 (기관별 최대값)
-    - 면적대비 에너지 사용비율: 에너지 사용량 / 연면적
-    - 에너지 사용 비중: 현재연도 사용량 / 현재연도 전체 사용량
-    - 3개년 평균 에너지 사용량 대비 증감률:
-        (현재연도 사용량 - 3개년 평균) / 3개년 평균
-      여기서 3개년 평균은 '1. 백데이터 분석'과 동일하게,
-      해당 연도보다 앞선 최대 3개년 평균을 사용한다.
-    - 시설별 평균 면적 대비 에너지 사용비율:
-        기관별 비율 / (같은 시설구분 기관들의 평균 비율)
+    반환:
+      df_org         : 각 기관별 지표 DataFrame
+      baseline_cur   : 각 기관별 3개년 평균 에너지 사용량 (현재연도 기준)
     """
     analysis_years: List[int] = spec["meta"]["analysis_years"]
     years = [y for y in analysis_years if y in df_all["연도"].unique()]
@@ -245,7 +238,8 @@ def _compute_org_level_current_metrics(
         index=usage_by_year_org.index, columns=years, dtype=float
     )
     for i, y in enumerate(years):
-        prev_years = years[:i][-3:]  # 해당 연도 이전의 최대 3개년
+        # 해당 연도보다 이전의 최대 3개년
+        prev_years = years[:i][-3:]
         if prev_years:
             baseline_by_year_org[y] = usage_by_year_org[prev_years].mean(axis=1)
         else:
@@ -260,13 +254,14 @@ def _compute_org_level_current_metrics(
     # 3개년 평균 에너지 사용량 대비 증감률
     vs3 = (usage_cur - baseline_cur) / baseline_cur.replace(0, np.nan)
 
-    # ✅ 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
+    # 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
     upa = usage_cur / area_by_org.replace(0, np.nan)
 
     total_cur = float(usage_cur.sum())
     if total_cur == 0:
         raise ValueError("현재연도 전체 사용량 합계가 0입니다.")
 
+    # 에너지 사용 비중
     share = usage_cur / total_cur
 
     df_org = pd.DataFrame(
@@ -291,8 +286,11 @@ def _compute_org_level_current_metrics(
 
     # 기관 고정 순서 적용
     df_org = df_org.reindex(org_order)
+    baseline_cur = baseline_cur.reindex(org_order)
 
-    return df_org
+    # ✅ DataFrame + Series 두 개를 반환 (기존 build_data_2_usage_analysis 와 호환)
+    return df_org, baseline_cur
+
 
 
 
