@@ -1,3 +1,5 @@
+# modules/loader.py
+
 from __future__ import annotations
 
 import json
@@ -235,6 +237,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
       - 시설구분 (의료시설/복지시설/기타시설로 재매핑)
       - 연면적
       - 연단위  (연간 에너지 사용량)
+      - (추가) 엑셀에 존재하는 1월~12월 컬럼을 그대로 보존
     """
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
@@ -266,6 +269,13 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     # 연간 사용량(연단위)
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
+    # 1월~12월 컬럼(있으면 df_raw에 그대로 보존)
+    month_pattern = re.compile(r"^\s*(\d{1,2})월\s*$")
+    month_cols = [c for c in df.columns if month_pattern.match(str(c))]
+    month_data: Dict[str, pd.Series] = {}
+    for c in month_cols:
+        month_data[c] = pd.to_numeric(df[c], errors="coerce")
+
     # 기관명 → 시설군(의료/복지/기타) 매핑
     org_unique = set(org_series.unique())
     unknown_orgs = sorted(org_unique.difference(ORG_FACILITY_GROUP.keys()))
@@ -279,17 +289,20 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
 
     # df_raw 구성
-    df_raw = pd.DataFrame(
-        {
-            "연도": int(year),
-            "year": int(year),
-            "기관명": org_series,
-            "org_name": org_series,
-            "시설구분": facility_group,
-            "연면적": area,
-            "연단위": annual_usage,
-        }
-    )
+    data = {
+        "연도": int(year),
+        "year": int(year),
+        "기관명": org_series,
+        "org_name": org_series,
+        "시설구분": facility_group,
+        "연면적": area,
+        "연단위": annual_usage,
+    }
+    df_raw = pd.DataFrame(data)
+
+    # 월별 사용량 컬럼 추가
+    for col_name, series in month_data.items():
+        df_raw[col_name] = series
 
     return df_raw
 
