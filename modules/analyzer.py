@@ -1,5 +1,3 @@
-# modules/analyzer.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,8 +39,7 @@ def _log_warning(msg: str) -> None:
 
 
 def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
-    """
-    loader.load_energy_files 가 반환한 year_to_raw 를 하나의 df로 합친다.
+    """loader.load_energy_files 가 반환한 year_to_raw 를 하나의 df로 합친다.
 
     필수 컬럼 (loader.build_df_raw 기준):
       ['기관명', '시설구분', '연면적', '연단위', '연도']
@@ -83,7 +80,7 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
                 f"{year}년 df_raw에서 연도/연면적/연단위에 NaN 이 있는 행 {na_cnt}개를 분석에서 제외합니다.\n"
                 f"{bad_rows.to_string(index=False)}"
             )
-           tmp[num_cols] = tmp[num_cols].fillna(0)
+            tmp = tmp.loc[~na_mask].copy()
 
         dfs.append(tmp)
 
@@ -114,9 +111,7 @@ class Data2Result:
 def _compute_overall_usage(
     df_all: pd.DataFrame, spec: dict, current_year: int
 ) -> pd.Series:
-    """
-    overall_current_year_usage + overall_yoy_and_3yr_change 계산.
-    """
+    """overall_current_year_usage + overall_yoy_and_3yr_change 계산."""
     analysis_years: List[int] = spec["meta"]["analysis_years"]
 
     if current_year not in analysis_years:
@@ -161,11 +156,8 @@ def _compute_overall_usage(
 
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
-    overall_usage_by_facility_type.usage_per_area(시설구분별) 계산.
-
-    엑셀 기준에 맞추어:
-      - 먼저 공단 전체 면적당 사용량(연단위/연면적)을 계산하고,
-      - 각 시설군의 면적당 사용량을 이 값으로 나눈 '비율'을 반환한다.
+    전체 공단의 면적당 사용량을 기준(1.0)으로 두고,
+    시설구분별 면적당 사용량이 이 기준 대비 몇 배인지 계산한다.
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
@@ -173,8 +165,8 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
 
     total_area = float(df_year["연면적"].sum())
     total_usage = float(df_year["연단위"].sum())
-    if total_area <= 0 or total_usage < 0:
-        raise ValueError("공단 전체 연면적 또는 에너지 사용량이 비정상입니다.")
+    if total_area <= 0:
+        raise ValueError("공단 전체 연면적 합계가 0입니다.")
 
     overall_upa = total_usage / total_area  # 공단 전체 면적당 사용량
 
@@ -217,7 +209,7 @@ def _compute_org_level_current_metrics(
        '에너지 사용 비중','3개년 평균 에너지 사용량 대비 증감률',
        '시설별 평균 면적 대비 에너지 사용비율']
     """
-    # 사용 연도 집합: spec.logic.rules.calculations → year in 필터
+    # spec 에 정의된 year in 필터 추출
     calc_conf = None
     for c in spec["logic"]["rules"]["calculations"]:
         if c.get("name") == "org_level_current_year_metrics":
@@ -259,7 +251,7 @@ def _compute_org_level_current_metrics(
         df.groupby(["기관명", "연도"], dropna=False)["연단위"].sum().unstack("연도")
     )
 
-    # 누락 연도는 0으로 채움
+    # 결측 연도는 0으로 보정
     for y in analysis_years:
         if y not in usage_by_year_org.columns:
             usage_by_year_org[y] = 0.0
@@ -318,8 +310,8 @@ def _compute_org_level_current_metrics(
         / facility_mean.replace(0, np.nan)
     )
 
-    # ⚠ 여기서는 reindex 하지 않고, 실제 존재하는 기관만 반환
-    # (공단 전체/기관별 보기에서의 정렬/필터는 app.py 에서 처리)
+    # 기관 고정 순서는 여기서 적용하지 않고,
+    # 화면 출력 단계(app.py)에서 보기 모드에 따라 정렬/필터링한다.
     return df_org
 
 
@@ -327,15 +319,7 @@ def build_data_2_usage_analysis(
     year_to_raw: Mapping[int, pd.DataFrame],
     current_year: Optional[int] = None,
 ) -> Data2Result:
-    """
-    data_2. 에너지 사용량 분석 전체 계산.
-
-    Returns
-    -------
-    Data2Result
-        overall: 1. 공단 전체기준 (1행 6열)
-        by_org: 2. 소속기구별 (기관 x 7열)
-    """
+    """data_2. 에너지 사용량 분석 전체 계산."""
     spec = load_spec()
     df_all = _concat_raw(year_to_raw)
 
@@ -372,9 +356,7 @@ def _compute_overall_feedback(
     spec: dict,
     current_year: int,
 ) -> pd.Series:
-    """
-    overall_recommended_usage_by_ndc 계산.
-    """
+    """overall_recommended_usage_by_ndc 계산."""
     analysis_years: List[int] = spec["meta"]["analysis_years"]
     ndc_rate: float = float(spec["meta"]["ndc_target_rate"])
 
@@ -488,16 +470,7 @@ def build_data_3_feedback(
     year_to_raw: Mapping[int, pd.DataFrame],
     current_year: Optional[int] = None,
 ) -> Data3Result:
-    """
-    data_3. 피드백 전체 계산.
-
-    Returns
-    -------
-    Data3Result
-        overall: 1. 공단 전체기준
-        by_org: 2. 소속기구별 요약
-        detail: 3. 에너지 사용량 관리 대상 상세 (O/X 표)
-    """
+    """data_3. 피드백 전체 계산."""
     spec = load_spec()
     df_all = _concat_raw(year_to_raw)
 
@@ -519,7 +492,7 @@ def build_data_3_feedback(
 
 
 # ======================================================================
-# 기존 app 호환용 래퍼 (compute_facility_feedback 등)
+# 기존 app 호환용 래퍼
 # ======================================================================
 
 
@@ -527,8 +500,6 @@ def compute_facility_feedback(
     selected_year: int,
     year_to_raw: Mapping[int, pd.DataFrame],
 ):
-    """
-    기존 app.py 에서 사용 중인 인터페이스를 유지하기 위한 래퍼.
-    """
+    """기존 app.py 에서 사용 중인 인터페이스를 유지하기 위한 래퍼."""
     result = build_data_3_feedback(year_to_raw, current_year=selected_year)
     return result.by_org, result.detail
