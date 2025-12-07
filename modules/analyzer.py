@@ -32,29 +32,34 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
     """
     loader.load_energy_files 가 반환한 year_to_raw 를 하나의 df로 합친다.
 
-    필수 컬럼: ['기관명', '시설구분', '연면적', 'U', 'W', 'V', '연도']
-    연단위 사용량 컬럼 '연단위' 를 추가한다.
+    필수 컬럼 (loader.build_df_raw 기준):
+      ['기관명', '시설구분', '연면적', '연단위', '연도']
     """
     if not year_to_raw:
         raise ValueError("year_to_raw 가 비어 있습니다. 먼저 에너지 사용량 파일을 업로드해 주세요.")
+
+    required_cols = ["기관명", "시설구분", "연면적", "연단위", "연도"]
 
     dfs: List[pd.DataFrame] = []
     for year, df in year_to_raw.items():
         if df is None or df.empty:
             continue
         tmp = df.copy()
-        # 숫자 컬럼 정제
-        for col in ["연도", "연면적", "U", "W", "V"]:
-            if col not in tmp.columns:
-                raise ValueError(f"df_raw에 '{col}' 컬럼이 없습니다. loader 단계에서 스키마를 확인해 주세요.")
-            tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
 
+        # 필수 컬럼 존재 여부 확인
+        for col in required_cols:
+            if col not in tmp.columns:
+                raise ValueError(
+                    f"{year}년 df_raw에 '{col}' 컬럼이 없습니다. loader 단계에서 스키마를 확인해 주세요."
+                )
+
+        # 숫자 컬럼 정제
+        for col in ["연도", "연면적", "연단위"]:
+            tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
             if tmp[col].isna().any():
                 na_cnt = int(tmp[col].isna().sum())
                 raise ValueError(f"{year}년 데이터의 '{col}' 컬럼에 NaN / 잘못된 값이 {na_cnt}개 있습니다.")
 
-        # 연단위 사용량: U + W + V
-        tmp["연단위"] = tmp["U"] + tmp["W"] + tmp["V"]
         dfs.append(tmp)
 
     if not dfs:
@@ -62,12 +67,13 @@ def _concat_raw(year_to_raw: Mapping[int, pd.DataFrame]) -> pd.DataFrame:
 
     df_all = pd.concat(dfs, ignore_index=True)
 
-    # 컬럼 이름 정리
+    # 컬럼 이름/형식 정리
     df_all["연도"] = df_all["연도"].astype(int)
     df_all["기관명"] = df_all["기관명"].astype(str)
     df_all["시설구분"] = df_all["시설구분"].astype(str)
 
     return df_all
+
 
 
 # ======================================================================
