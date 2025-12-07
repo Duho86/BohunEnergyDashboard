@@ -9,7 +9,14 @@ from typing import Dict, Mapping, Optional
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt  # 원그래프(파이 차트)용
+
+# 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
+try:
+    import altair as alt
+    ALT_AVAILABLE = True
+except ImportError:
+    ALT_AVAILABLE = False
+
 
 # ===========================================================
 # 내부 모듈 import (오류 발생 시 화면에 표시)
