@@ -155,7 +155,7 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     """기관별 값을 받아 원그래프(Altair)를 그린다.
 
     - use_abs=True: 음수 가능 지표(증감률 등)에 절대값 적용
-    - 색상 겹침 방지: category20 팔레트 적용
+    - 색상 팔레트: category20 (최대 20개 색상)
     - 기관명 정렬: value 내림차순(높은 값 → 낮은 값)
     """
     if not ALT_AVAILABLE:
@@ -182,8 +182,10 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
         st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
         return
 
+    # 값 큰 순으로 정렬 (높은 → 낮은)
+    s = s.sort_values(ascending=False)
+
     # 너무 많은 기관일 경우 상위 10개 + 기타 묶음
-    s = s.sort_values(ascending=False)  # 내림차순 정렬 (높은 → 낮은)
     if len(s) > 10:
         top = s.iloc[:10]
         others = s.iloc[10:].sum()
@@ -193,23 +195,28 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     df = s.reset_index()
     df.columns = ["기관명", "value"]
 
-    # Altair 파이 차트 + 색상 팔레트 고정 (색 겹침 방지)
+    # Altair 파이 차트 (v4/v5 호환 형태)
     chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
-            theta="value:Q",
+            theta=alt.Theta(field="value", type="quantitative", stack=True),
             color=alt.Color(
-                "기관명:N",
-                sort="-value",  # 범례 정렬: 값 큰 순
-                scale=alt.Scale(scheme="category20")  # 색상 팔레트 (20개 확실히 구분)
+                field="기관명",
+                type="nominal",
+                sort=alt.SortField(field="value", order="descending"),
+                scale=alt.Scale(scheme="category20"),  # 색상 팔레트
             ),
-            tooltip=["기관명:N", alt.Tooltip("value:Q", format=",.1f")],
+            tooltip=[
+                alt.Tooltip("기관명:N", title="기관명"),
+                alt.Tooltip("value:Q", title="값", format=",.1f"),
+            ],
         )
         .properties(title=title)
     )
 
     st.altair_chart(chart, use_container_width=True)
+
 
 
 
