@@ -155,14 +155,10 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
     """
     시설구분별 '면적대비 에너지 사용비율' 평균을 계산한다.
 
-    엑셀:
-      =AVERAGEIFS(소속기구별!E11:E29, 소속기구별!B11:B29, 시설구분)
-
-    절차:
-      1) 현재 연도 데이터만 사용
-      2) 기관별 (에너지 사용량, 연면적, 시설구분) 집계
-      3) 기관별 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
-      4) 시설구분별로 위 비율의 산술평균
+    엑셀 기준:
+      - 기관별 면적대비 비율  =  연면적 / 에너지 사용량
+      - 시설구분별 평균값     =  해당 시설구분 기관들의 위 비율의 산술평균
+        (AVERAGEIFS(소속기구별!E열, 소속기구별!B열, 시설구분)에 해당)
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
@@ -174,11 +170,11 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
         .agg({"연단위": "sum", "연면적": "max"})
     )
 
-    # 기관별 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
-    usage_per_area = grouped["연단위"] / grouped["연면적"].replace(0, np.nan)
-    grouped["면적대비 에너지 사용비율"] = usage_per_area
+    # ✅ 기관별 면적대비 에너지 사용비율 = 연면적 / 에너지 사용량
+    area_per_usage = grouped["연면적"] / grouped["연단위"].replace(0, np.nan)
+    grouped["면적대비 에너지 사용비율"] = area_per_usage
 
-    # 시설구분별 평균 (엑셀 AVERAGEIFS 와 동일한 개념)
+    # 시설구분별 평균 (단순 평균)
     fac_mean = (
         grouped.groupby("시설구분", dropna=False)["면적대비 에너지 사용비율"]
         .mean()
@@ -193,6 +189,8 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
     )
 
 
+
+
 def _compute_org_level_current_metrics(
     df_all: pd.DataFrame,
     spec: dict,
@@ -202,8 +200,8 @@ def _compute_org_level_current_metrics(
     2. 에너지 사용량 분석 – 소속기구별 표 전체를 계산한다.
 
     반환:
-      df_org         : 각 기관별 지표 DataFrame
-      baseline_cur   : 각 기관별 3개년 평균 에너지 사용량 (현재연도 기준)
+      df_org       : 각 기관별 지표 DataFrame
+      baseline_cur : 각 기관별 3개년 평균 에너지 사용량 (현재연도 기준)
     """
     analysis_years: List[int] = spec["meta"]["analysis_years"]
     years = [y for y in analysis_years if y in df_all["연도"].unique()]
@@ -254,8 +252,8 @@ def _compute_org_level_current_metrics(
     # 3개년 평균 에너지 사용량 대비 증감률
     vs3 = (usage_cur - baseline_cur) / baseline_cur.replace(0, np.nan)
 
-    # 면적대비 에너지 사용비율 = 에너지 사용량 / 연면적
-    upa = usage_cur / area_by_org.replace(0, np.nan)
+    # ✅ 면적대비 에너지 사용비율 = 연면적 / 에너지 사용량
+    upa = area_by_org / usage_cur.replace(0, np.nan)
 
     total_cur = float(usage_cur.sum())
     if total_cur == 0:
@@ -275,21 +273,22 @@ def _compute_org_level_current_metrics(
         }
     )
 
-    # 시설별 평균 면적 대비 에너지 사용비율
+    # ✅ 시설별 평균 면적 대비 에너지 사용비율
+    #   = (기관별 연면적/사용량) ÷ (해당 시설구분의 평균 연면적/사용량)
     facility_mean = df_org.groupby("시설구분", dropna=False)[
         "면적대비 에너지 사용비율"
     ].transform("mean")
     df_org["시설별 평균 면적 대비 에너지 사용비율"] = (
-        df_org["면적대비 에너지 사용비율"]
-        / facility_mean.replace(0, np.nan)
+        df_org["면적대비 에너지 사용비율"] /
+        facility_mean.replace(0, np.nan)
     )
 
     # 기관 고정 순서 적용
     df_org = df_org.reindex(org_order)
     baseline_cur = baseline_cur.reindex(org_order)
 
-    # ✅ DataFrame + Series 두 개를 반환 (기존 build_data_2_usage_analysis 와 호환)
     return df_org, baseline_cur
+
 
 
 
