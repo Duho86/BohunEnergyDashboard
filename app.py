@@ -392,15 +392,30 @@ def render_upload_tab(
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
             df_raw_all = df_raw_all_tmp
 
-            # 🔹 이 두 줄: df_raw / year_to_raw 를 세션에 캐시
+            # 🔹 df_raw / year_to_raw 를 세션에 캐시
             st.session_state["year_to_raw_cache"] = year_to_raw_tmp
             st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
-            st.info(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
+            st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
+
+            # 🔁 캐시를 반영한 상태로 전체 스크립트를 다시 실행
+            try:
+                import streamlit as st as _st  # 이미 import돼 있다면 무시
+            except Exception:
+                pass
+            try:
+                st.experimental_rerun()
+            except Exception:
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
             return
+
 
 
       # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
