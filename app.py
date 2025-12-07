@@ -367,7 +367,7 @@ def render_upload_tab(
         for f in uploaded_files:
             year = infer_year_from_filename(f.name)
             if year is None:
-                log_warning(f"연도를 찾을 수 없어 무시된 파일: {f.name}")
+                st.warning(f"연도를 찾을 수 없어 무시된 파일: {f.name}")
                 continue
             year_to_file_session[year] = f
         st.session_state["year_to_file"] = year_to_file_session
@@ -386,30 +386,27 @@ def render_upload_tab(
 
     st.markdown("---")
 
-# 4) df_raw_all 이 비어 있으면 여기서 한 번 더 로딩을 시도 (안전장치)
-if (df_raw_all is None or df_raw_all.empty) and merged:
-    try:
-        year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-        df_raw_all = df_raw_all_tmp
+    # 4) df_raw_all 이 비어 있으면 여기서 한 번 더 로딩을 시도 (안전장치)
+    if (df_raw_all is None or df_raw_all.empty) and merged:
+        try:
+            year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
+            df_raw_all = df_raw_all_tmp
 
-        # 🔹 df_raw / year_to_raw 를 세션에 캐시
-        st.session_state["year_to_raw_cache"] = year_to_raw_tmp
-        st.session_state["df_raw_all_cache"] = df_raw_all_tmp
+            # 🔹 df_raw / year_to_raw 를 세션에 캐시
+            st.session_state["year_to_raw_cache"] = year_to_raw_tmp
+            st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
-        st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
+            st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
 
-        # 🔁 캐시 반영 후 즉시 전체 스크립트를 재실행 (대시보드/사이드바 둘 다 갱신)
-        st.experimental_rerun()
+            # 🔁 캐시 반영 후 즉시 전체 스크립트를 재실행
+            st.experimental_rerun()
 
-    except Exception as e:
-        st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
-        st.exception(e)
-        return
+        except Exception as e:
+            st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
+            st.exception(e)
+            return
 
-
-
-
-      # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
+    # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
     if df_raw_all is None or df_raw_all.empty:
         st.info("아직 df_raw 데이터가 없어 백데이터 분석 표를 생성할 수 없습니다.")
         return
@@ -422,7 +419,7 @@ if (df_raw_all is None or df_raw_all.empty) and merged:
         st.exception(e)
         return
 
-    # 공통: 구분 컬럼은 포맷 적용 안 함 (연도 문자열 그대로 표시)
+    # 공통: '구분' 컬럼은 포맷 적용 안 함 (연도 문자열 그대로)
     no_format_for_label = {"구분": ""}
 
     # 7) 표 렌더링
@@ -431,7 +428,7 @@ if (df_raw_all is None or df_raw_all.empty) and merged:
         tbl_usage,
         fmt_rules,
         column_fmt_map=no_format_for_label,
-        # 숫자: 정수, 천단위 콤마, 단위 없음
+        # 숫자: 정수 + 천단위 콤마, 단위 없음
         default_fmt_name="integer_comma",
     )
     st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
@@ -456,26 +453,6 @@ if (df_raw_all is None or df_raw_all.empty) and merged:
     )
     st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
 
-
-    st.markdown("---")
-    st.markdown("### 2. 연도×기관 연면적")
-    tbl_area_fmt = format_table(
-        tbl_area,
-        fmt_rules,
-        column_fmt_map={},
-        default_fmt_name="area_m2_int",
-    )
-    st.dataframe(tbl_area_fmt, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### 3. 연도별 3개년 평균 에너지 사용량")
-    tbl_avg3_fmt = format_table(
-        tbl_avg3,
-        fmt_rules,
-        column_fmt_map={},
-        default_fmt_name="energy_kwh_int",
-    )
-    st.dataframe(tbl_avg3_fmt, use_container_width=True)
 
 
 # ===========================================================
