@@ -162,13 +162,21 @@ def _compute_overall_usage(
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
     """
     overall_usage_by_facility_type.usage_per_area(시설구분별) 계산.
-    시설구분 값은 loader 단계에서
-      '의료시설' / '복지시설' / '기타시설'
-    로 이미 재매핑되어 있다고 가정한다.
+
+    엑셀 기준에 맞추어:
+      - 먼저 공단 전체 면적당 사용량(연단위/연면적)을 계산하고,
+      - 각 시설군의 면적당 사용량을 이 값으로 나눈 '비율'을 반환한다.
     """
     df_year = df_all[df_all["연도"] == current_year].copy()
     if df_year.empty:
         raise ValueError(f"{current_year}년 데이터가 없습니다.")
+
+    total_area = float(df_year["연면적"].sum())
+    total_usage = float(df_year["연단위"].sum())
+    if total_area <= 0 or total_usage < 0:
+        raise ValueError("공단 전체 연면적 또는 에너지 사용량이 비정상입니다.")
+
+    overall_upa = total_usage / total_area  # 공단 전체 면적당 사용량
 
     grp = df_year.groupby("시설구분", dropna=False).agg(
         usage_sum=("연단위", "sum"),
@@ -178,12 +186,14 @@ def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.
     if (grp["area_sum"] == 0).any():
         raise ValueError("시설구분별 연면적 합계가 0인 항목이 있습니다.")
 
-    grp["usage_per_area"] = grp["usage_sum"] / grp["area_sum"]
+    grp["usage_per_area_ratio"] = (
+        (grp["usage_sum"] / grp["area_sum"]) / overall_upa
+    )
 
     def get_value(ftype: str) -> float:
         if ftype not in grp.index:
             return float("nan")
-        return float(grp.loc[ftype, "usage_per_area"])
+        return float(grp.loc[ftype, "usage_per_area_ratio"])
 
     return pd.Series(
         {
@@ -207,7 +217,7 @@ def _compute_org_level_current_metrics(
        '에너지 사용 비중','3개년 평균 에너지 사용량 대비 증감률',
        '시설별 평균 면적 대비 에너지 사용비율']
     """
-    # spec 에 정의된 year in 필터 추출
+    # 사용 연도 집합: spec.logic.rules.calculations → year in 필터
     calc_conf = None
     for c in spec["logic"]["rules"]["calculations"]:
         if c.get("name") == "org_level_current_year_metrics":
@@ -230,17 +240,27 @@ def _compute_org_level_current_metrics(
             "org_level_current_year_metrics 의 year in 필터를 spec 에서 찾을 수 없습니다."
         )
 
+    # 실제 존재하는 연도만 사용
+    years_filter = sorted(
+        [y for y in years_filter if y in df_all["연도"].unique()]
+    )
+    if not years_filter:
+        raise ValueError("year in 필터에 해당하는 데이터가 없습니다.")
+
     df = df_all[df_all["연도"].isin(years_filter)].copy()
     if df.empty:
         raise ValueError(f"year in {years_filter} 데이터가 없습니다.")
+
+    analysis_years: List[int] = spec["meta"]["analysis_years"]
+    analysis_years = [y for y in analysis_years if y in years_filter]
 
     # 연도별 연단위 합계 (소속기구별)
     usage_by_year_org = (
         df.groupby(["기관명", "연도"], dropna=False)["연단위"].sum().unstack("연도")
     )
 
-    # 결측 연도는 0으로 보정
-    for y in years_filter:
+    # 누락 연도는 0으로 채움
+    for y in analysis_years:
         if y not in usage_by_year_org.columns:
             usage_by_year_org[y] = 0.0
 
@@ -252,21 +272,24 @@ def _compute_org_level_current_metrics(
         lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
     )
 
-    # current/prev/2022 usage (엑셀 규칙 기준)
-    usage_2022 = usage_by_year_org.get(
-        2022, pd.Series(0.0, index=usage_by_year_org.index)
-    )
-    usage_prev = usage_by_year_org.get(
-        current_year - 1, pd.Series(0.0, index=usage_by_year_org.index)
-    )
-    usage_cur = usage_by_year_org.get(
-        current_year, pd.Series(0.0, index=usage_by_year_org.index)
-    )
+    # 현재연도 사용량
+    if current_year not in usage_by_year_org.columns:
+        usage_by_year_org[current_year] = 0.0
+    usage_cur = usage_by_year_org[current_year]
 
-    avg3 = (usage_2022 + usage_prev + usage_cur) / 3.0
+    # 3개년 평균(현재연도 이전 최대 3개년, 기관별)
+    past_years = [y for y in analysis_years if y < current_year]
+    three_years = past_years[-3:]
+    if three_years:
+        avg3 = usage_by_year_org[three_years].mean(axis=1)
+    else:
+        # 과거 데이터가 없으면 현재값을 기준으로(증감률 0)
+        avg3 = usage_cur.copy()
 
-    # 0 division 방지를 위해 avg3==0 은 NaN 처리
+    # 증감률 (cur - avg3) / avg3
     vs3 = (usage_cur - avg3) / avg3.replace(0, np.nan)
+
+    # 면적당 사용량
     upa = usage_cur / area_by_org.replace(0, np.nan)
 
     total_cur = float(usage_cur.sum())
@@ -291,13 +314,12 @@ def _compute_org_level_current_metrics(
         "면적대비 에너지 사용비율"
     ].transform("mean")
     df_org["시설별 평균 면적 대비 에너지 사용비율"] = (
-        df_org["면적대비 에너지 사용비율"] / facility_mean.replace(0, np.nan)
+        df_org["면적대비 에너지 사용비율"]
+        / facility_mean.replace(0, np.nan)
     )
 
-    # 기관 고정 순서 적용
-    org_order = list(get_org_order())
-    df_org = df_org.reindex(org_order)
-
+    # ⚠ 여기서는 reindex 하지 않고, 실제 존재하는 기관만 반환
+    # (공단 전체/기관별 보기에서의 정렬/필터는 app.py 에서 처리)
     return df_org
 
 
@@ -392,7 +414,7 @@ def _compute_org_recommended_and_flags(
     """
     org_level_recommended_usage_and_flags + 상세 관리대상 표 생성.
 
-    management_flag 규칙 (사용자 선택 (C) 반영):
+    management_flag 규칙:
       - 조건1: usage_vs_recommended > 1
       - 조건2: usage_per_area > 전체 기관 평균 usage_per_area
       - 최종: 조건1 OR 조건2
@@ -401,18 +423,14 @@ def _compute_org_recommended_and_flags(
 
     # df_org_metrics 는 _compute_org_level_current_metrics 결과
     cur_usage = df_org_metrics["에너지 사용량"]
-    avg3_usage = df_org_metrics["3개년 평균 에너지 사용량 대비 증감률"]  # (cur - avg3) / avg3
-
-    # avg3 값을 역산: (cur - avg3) / avg3 = r → cur = avg3 * (1 + r)
-    avg3 = cur_usage / (1.0 + avg3_usage.replace(-1.0, np.nan))
 
     recommended = cur_usage * (1.0 - ndc_rate)
     usage_vs_recommended = cur_usage / recommended.replace(0, np.nan)
 
-    # 성장률 (3개년 평균 대비)
-    growth_rate = (cur_usage - avg3) / avg3.replace(0, np.nan)
+    # 3개년 평균 대비 성장률은 metrics 에서 계산된 값을 그대로 사용
+    growth_rate = df_org_metrics["3개년 평균 에너지 사용량 대비 증감률"]
 
-    # 순위 계산 (내림차순, 1등이 가장 큰 값) – float 그대로 유지 (IntCastingNaNError 방지)
+    # 순위 계산 (내림차순, 1등이 가장 큰 값) – float 그대로 유지
     rank_by_usage = cur_usage.rank(ascending=False, method="min")
     rank_by_growth = growth_rate.rank(ascending=False, method="min")
     rank_by_upa = df_org_metrics["면적대비 에너지 사용비율"].rank(
@@ -511,20 +529,6 @@ def compute_facility_feedback(
 ):
     """
     기존 app.py 에서 사용 중인 인터페이스를 유지하기 위한 래퍼.
-
-    Parameters
-    ----------
-    selected_year:
-        선택 연도 (보통 2024).
-    year_to_raw:
-        loader.load_energy_files 가 반환한 {연도: df_raw} 매핑.
-
-    Returns
-    -------
-    fb_by_org : pd.DataFrame
-        '2. 소속기구별' 피드백 표
-    fb_detail : pd.DataFrame
-        '3. 에너지 사용량 관리 대상 상세' O/X 표
     """
     result = build_data_3_feedback(year_to_raw, current_year=selected_year)
     return result.by_org, result.detail
