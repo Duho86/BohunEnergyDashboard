@@ -248,27 +248,33 @@ def render_dashboard_tab(
             st.info("월별 그래프를 그릴 df_raw 데이터가 없습니다.")
         else:
             df_year = df_all[df_all["연도"] == selected_year].copy()
-            month_pattern = re.compile(r"^\s*(\d{1,2})월\s*$")
-            month_cols = [c for c in df_year.columns if month_pattern.match(str(c))]
 
-            if not month_cols:
+            # 예: "1월", "1월 사용량", "1 월" 등 모두 인식
+            month_info = []
+            for c in df_year.columns:
+                m = re.search(r"(\d{1,2})\s*월", str(c))
+                if m:
+                    month_num = int(m.group(1))
+                    if 1 <= month_num <= 12:
+                        month_info.append((month_num, c))
+
+            if not month_info:
                 st.info(
-                    "1월~12월 컬럼을 찾지 못해 월별 에너지 사용량 그래프를 표시할 수 없습니다."
+                    "1월~12월 관련 컬럼을 찾지 못해 월별 에너지 사용량 그래프를 표시할 수 없습니다."
                 )
             else:
+                # 월 번호 기준으로 정렬 후, 해당 컬럼들만 사용
+                month_info.sort(key=lambda x: x[0])
+                month_nums = [m for m, _ in month_info]
+                month_cols = [c for _, c in month_info]
+
                 for c in month_cols:
                     df_year[c] = pd.to_numeric(df_year[c], errors="coerce")
+
                 monthly = df_year[month_cols].sum(axis=0)
-
-                # 인덱스를 1~12 정수로 변환
-                months: list[int] = []
-                for c in monthly.index:
-                    m = month_pattern.match(str(c))
-                    months.append(int(m.group(1)) if m else 0)
-                monthly.index = months
-                monthly = monthly.sort_index()
-
+                monthly.index = month_nums  # 인덱스를 1~12 숫자로
                 st.line_chart(monthly)
+
 
     # 연도별 에너지 사용량 추이 (막대, 최대 5개년)
     with col_g2:
@@ -369,8 +375,8 @@ def render_dashboard_tab(
             st.info("시설구분별 데이터가 없습니다.")
 
     st.markdown("---")
-    st.markdown("**2. 소속기구별 분석**")
-    st.dataframe(df2_by_org_fmt, use_container_width=True)
+    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
+    st.dataframe(df3_detail, use_container_width=True)
 
     # -------------------------------------------------------
     # 2. 피드백 (data_3)
