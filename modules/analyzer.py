@@ -339,36 +339,63 @@ def _compute_overall_feedback(
     """
     공단 전체 피드백 (권장 사용량 + 감축률) 계산.
 
-    엑셀과 맞추기 위해:
-      - 권장 에너지 사용량: 공단 전체 3개년 평균 × (1 - NDC)
-      - 전년대비 감축률: -NDC (정책 목표값)
-      - 3개년 대비 감축률: (권장 - 3개년 평균) / 3개년 평균
+    엑셀 규칙을 그대로 따른다.
+
+    - 권장 에너지 사용량:
+        기준연도(= current_year 바로 이전 연도)의 전체 사용량 합계 × (1 - NDC)
+        → '1. 백데이터 분석'!U7 × (1 - NDC)에 해당
+
+    - 전년대비 감축률:
+        NDC 연평균 감축률 자체를 그대로 사용 (-NDC)
+
+    - 3개년(과거 평균) 대비 감축률:
+        (권장 사용량 - 기준연도 이전 모든 연도의 평균 합계) / 그 평균 합계
+        → '3. 피드백'!에서 ('권장 사용량' - '1. 백데이터 분석'!U23) / U23 에 해당
     """
     analysis_years: List[int] = spec["meta"]["analysis_years"]
     ndc_rate: float = float(spec["meta"]["ndc_target_rate"])
 
+    # 연도별 전체 사용량 합계
     total_by_year = (
-        df_all.groupby("연도", dropna=False)["연단위"].sum().reindex(analysis_years)
+        df_all.groupby("연도", dropna=False)["연단위"]
+        .sum()
+        .reindex(analysis_years)
     )
+
     if total_by_year.isna().any():
         raise ValueError("연도별 연단위 합계 계산 중 NaN 이 발생했습니다.")
 
-    # current_year 이전 연도 중 마지막 3개년 (예: 2021,2022,2023)
-    past_years = [y for y in analysis_years if y < current_year]
-    three_years = past_years[-3:]
-    if not three_years:
-        raise ValueError("3개년 평균을 계산할 과거 연도가 충분하지 않습니다.")
+    years_sorted = [y for y in analysis_years if y in total_by_year.index]
 
-    avg3 = float(total_by_year.loc[three_years].mean())
+    if current_year not in years_sorted:
+        raise ValueError(f"current_year={current_year} 가 분석 연도 목록에 없습니다.")
 
-    # 🔹 권장 에너지 사용량 = 3개년 평균 × (1 - NDC)
-    recommended = avg3 * (1.0 - ndc_rate)
+    idx = years_sorted.index(current_year)
+    if idx == 0:
+        raise ValueError(
+            "current_year 앞에 기준이 될 전년 데이터가 없어 권장 사용량을 계산할 수 없습니다."
+        )
 
-    # 전년대비 감축률: 정책상 목표치 그대로
+    # 기준연도: current_year 바로 이전 연도 (엑셀 U7 에 해당)
+    base_year = years_sorted[idx - 1]
+    base_total = float(total_by_year.loc[base_year])
+
+    # 🔹 권장 에너지 사용량 = 기준연도 전체 사용량 × (1 - NDC)
+    recommended = base_total * (1.0 - ndc_rate)
+
+    # 🔹 전년대비 감축률 = 정책 NDC 값 그대로
     reduction_yoy = -ndc_rate
 
-    # 3개년 대비 감축률 = (권장 - 3개년 평균) / 3개년 평균
-    reduction_vs3 = (recommended - avg3) / avg3
+    # 🔹 3개년(과거 평균) 대비 감축률
+    #   기준연도 이전에 존재하는 모든 연도의 평균 합계 (엑셀 U23에 해당)
+    past_years = years_sorted[: idx - 1]  # base_year 이전 연도들
+    if past_years:
+        past_avg = float(total_by_year.loc[past_years].mean())
+    else:
+        # 과거 연도가 없으면 기준연도만 사용
+        past_avg = base_total
+
+    reduction_vs3 = (recommended - past_avg) / past_avg
 
     return pd.Series(
         {
@@ -377,6 +404,7 @@ def _compute_overall_feedback(
             "3개년 대비 감축률": reduction_vs3,
         }
     )
+
 
 
 
