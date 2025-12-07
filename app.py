@@ -152,10 +152,11 @@ def format_table(
 # 원그래프(파이 차트) 유틸
 # ===========================================================
 def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False) -> None:
-    """기관별 값을 받아 원그래프를 그려준다.
+    """기관별 값을 받아 원그래프(Altair)를 그린다.
 
-    - use_abs=True: 음수 값 가능 지표는 절대값으로 비교 (예: 증감률)
-    - 값이 모두 0/NaN 이면 안내만 출력
+    - use_abs=True: 음수 가능 지표(증감률 등)에 절대값 적용
+    - 색상 겹침 방지: category20 팔레트 적용
+    - 기관명 정렬: value 내림차순(높은 값 → 낮은 값)
     """
     if not ALT_AVAILABLE:
         st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
@@ -165,22 +166,24 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
         st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
 
+    # NaN 제거
     s = series.dropna()
     if s.empty:
         st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
 
+    # 증감률 등 음수 가능 지표는 절대값으로 비교
     if use_abs:
         s = s.abs()
 
-    # 0 이하 값은 제외 (파이 차트 특성상 음수/0 불가)
+    # 파이차트는 0/음수 불가 → 0 제거
     s = s[s > 0]
     if s.empty:
         st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
         return
 
-    # 너무 많은 조각이 생기지 않도록 상위 10개 + 기타
-    s = s.sort_values(ascending=False)
+    # 너무 많은 기관일 경우 상위 10개 + 기타 묶음
+    s = s.sort_values(ascending=False)  # 내림차순 정렬 (높은 → 낮은)
     if len(s) > 10:
         top = s.iloc[:10]
         others = s.iloc[10:].sum()
@@ -190,18 +193,24 @@ def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False)
     df = s.reset_index()
     df.columns = ["기관명", "value"]
 
+    # Altair 파이 차트 + 색상 팔레트 고정 (색 겹침 방지)
     chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
             theta="value:Q",
-            color="기관명:N",
-            tooltip=["기관명:N", "value:Q"],
+            color=alt.Color(
+                "기관명:N",
+                sort="-value",  # 범례 정렬: 값 큰 순
+                scale=alt.Scale(scheme="category20")  # 색상 팔레트 (20개 확실히 구분)
+            ),
+            tooltip=["기관명:N", alt.Tooltip("value:Q", format=",.1f")],
         )
         .properties(title=title)
     )
 
     st.altair_chart(chart, use_container_width=True)
+
 
 
 
