@@ -111,36 +111,55 @@ class Data2Result:
 def _compute_overall_usage(
     df_all: pd.DataFrame, spec: dict, current_year: int
 ) -> pd.Series:
-    """공단 전체 에너지 사용량 / 전년대비 / 3개년 평균 대비."""
+    """공단 전체 에너지 사용량 / 전년대비 / 3개년 평균 대비.
+
+    기존에는 spec["meta"]["analysis_years"] 에만 의존해서
+    해당 목록에 없는 연도(예: 2025)가 선택되면 ValueError 를 발생시켰다.
+    이제는 실제 데이터에 존재하는 연도까지 포함하여 동적으로 계산하고,
+    데이터가 없는 연도는 0으로 처리한다.
+    """
     analysis_years: List[int] = spec["meta"]["analysis_years"]
 
-    if current_year not in analysis_years:
-        raise ValueError(
-            f"current_year={current_year} 가 meta.analysis_years 에 없습니다."
-        )
+    # df_all 에 존재하는 연도 목록
+    years_in_data = [
+        int(y) for y in sorted(df_all["연도"].dropna().unique().tolist())
+    ]
+    if not years_in_data:
+        raise ValueError("df_raw 에 연도 데이터가 없습니다.")
 
-    prev_year = current_year - 1
-    if prev_year not in analysis_years:
-        raise ValueError(f"전년({prev_year}) 데이터가 meta.analysis_years 에 없습니다.")
+    # spec 정의 + 실제 데이터 연도 모두 포함
+    years_all = sorted(set(analysis_years) | set(years_in_data))
 
-    total_by_year = (
-        df_all.groupby("연도", dropna=False)["연단위"].sum().reindex(analysis_years)
-    )
-    if total_by_year.isna().any():
-        raise ValueError("연도별 연단위 합계 계산 중 NaN 이 발생했습니다.")
+    if current_year not in years_all:
+        raise ValueError(f"{current_year}년은 분석 가능한 연도 목록에 없습니다.")
+
+    # 연도별 연단위 합계 (데이터가 없는 연도는 0으로)
+    total_by_year = df_all.groupby("연도", dropna=False)["연단위"].sum()
+    total_by_year = total_by_year.reindex(years_all, fill_value=0.0)
 
     cur = float(total_by_year.loc[current_year])
-    prev = float(total_by_year.loc[prev_year])
 
-    past_years = [y for y in analysis_years if y < current_year]
+    # 직전 연도(또는 가장 가까운 과거 연도) 찾기
+    prev_candidates = [y for y in years_all if y < current_year]
+    if prev_candidates:
+        prev_year = prev_candidates[-1]
+        prev = float(total_by_year.loc[prev_year])
+    else:
+        prev_year = None
+        prev = 0.0
+
+    # 전년대비 증감률 (전년이 없거나 0이면 0으로 처리)
+    yoy_rate = (cur - prev) / prev if prev != 0 else 0.0
+
+    # 직전 최대 3개년 평균 (과거 연도가 없으면 0으로 처리)
+    past_years = [y for y in years_all if y < current_year]
     three_years = past_years[-3:]
-    avg3 = float(total_by_year.loc[three_years].mean())
-
-    if prev == 0 or avg3 == 0:
-        raise ValueError("전년 또는 3개년 평균 사용량이 0입니다.")
-
-    yoy_rate = (cur - prev) / prev
-    vs3_rate = (cur - avg3) / avg3
+    if three_years:
+        avg3 = float(total_by_year.loc[three_years].mean())
+        vs3_rate = (cur - avg3) / avg3 if avg3 != 0 else 0.0
+    else:
+        avg3 = 0.0
+        vs3_rate = 0.0
 
     return pd.Series(
         {
@@ -149,6 +168,7 @@ def _compute_overall_usage(
             "3개년 평균 에너지 사용량 대비 증감률": vs3_rate,
         }
     )
+
 
 
 def _compute_overall_by_facility(df_all: pd.DataFrame, current_year: int) -> pd.Series:
@@ -263,6 +283,107 @@ def _compute_org_level_current_metrics(
     share = usage_cur / total_cur
 
     df_org = pd.DataFrame(
+        {def _compute_org_level_current_metrics(
+    df_all: pd.DataFrame,
+    spec: dict,
+    current_year: int,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    소속기구별 현재 연도 지표 + 3개년 평균(기관별)을 계산한다.
+
+    반환:
+      df_org : 각 기관별 지표 DataFrame
+      avg3   : 각 기관별 3개년 평균 에너지 사용량 (baseline)
+    """
+    # spec 에 정의된 year in 필터 추출
+    calc_conf = None
+    for c in spec["logic"]["rules"]["calculations"]:
+        if c.get("name") == "org_level_current_year_metrics":
+            calc_conf = c
+            break
+
+    if calc_conf is None:
+        raise ValueError(
+            "spec.logic.rules.calculations 에 org_level_current_year_metrics 설정이 없습니다."
+        )
+
+    years_filter: List[int] = []
+    for f in calc_conf.get("filters", []):
+        if f.get("field") == "year" and f.get("op") == "in":
+            years_filter = list(f.get("value", []))
+            break
+
+    if not years_filter:
+        raise ValueError(
+            "org_level_current_year_metrics 의 year in 필터를 spec 에서 찾을 수 없습니다."
+        )
+
+    # 🔹 실제 데이터에 존재하는 연도까지 포함해서 분석
+    years_in_data = [
+        int(y) for y in sorted(df_all["연도"].dropna().unique().tolist())
+    ]
+    years_all = sorted(set(years_filter) | set(years_in_data))
+
+    df = df_all[df_all["연도"].isin(years_all)].copy()
+    if df.empty:
+        raise ValueError(f"연도 {years_all} 에 해당하는 데이터가 없습니다.")
+
+    # 연도별 연단위 합계 (기관 × 연도)
+    usage_by_year_org = (
+        df.groupby(["기관명", "연도"], dropna=False)["연단위"].sum().unstack("연도")
+    )
+
+    # 결측 연도는 0으로 보정
+    for y in years_all:
+        if y not in usage_by_year_org.columns:
+            usage_by_year_org[y] = 0.0
+
+    usage_by_year_org = usage_by_year_org[sorted(usage_by_year_org.columns)]
+
+    # area, facility_type
+    area_by_org = df.groupby("기관명", dropna=False)["연면적"].max()
+    fac_type_by_org = df.groupby("기관명", dropna=False)["시설구분"].agg(
+        lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+    )
+
+    # 기관 순서는 spec 의 org_order 에 맞춤
+    org_order = get_org_order()
+    usage_by_year_org = usage_by_year_org.reindex(org_order, fill_value=0.0)
+    area_by_org = area_by_org.reindex(org_order)
+    fac_type_by_org = fac_type_by_org.reindex(org_order)
+
+    # 현재 연도 사용량 (해당 연도 데이터가 없으면 0으로)
+    if current_year not in usage_by_year_org.columns:
+        usage_by_year_org[current_year] = 0.0
+    usage_by_year_org = usage_by_year_org[sorted(usage_by_year_org.columns)]
+
+    usage_cur = usage_by_year_org.get(
+        current_year, pd.Series(0.0, index=usage_by_year_org.index)
+    )
+
+    # current_year 기준 직전 3개년 평균
+    years_sorted = sorted(usage_by_year_org.columns)
+    prev_years = [y for y in years_sorted if y < current_year]
+    three_years = prev_years[-3:]
+    if not three_years:
+        avg3 = usage_cur.copy()
+    else:
+        avg3 = usage_by_year_org[three_years].mean(axis=1)
+
+    # 3개년 평균 대비 증감률
+    vs3 = (usage_cur - avg3) / avg3.replace(0, np.nan)
+
+    # 면적대비 에너지 사용비율  (기존 구현 그대로 사용)
+    upa = usage_cur / area_by_org.replace(0, np.nan)
+
+    total_cur = float(usage_cur.sum())
+    if total_cur == 0:
+        # 데이터가 전혀 없으면 0으로 반환 (오류 대신)
+        share = pd.Series(0.0, index=usage_cur.index)
+    else:
+        share = usage_cur / total_cur
+
+    df_org = pd.DataFrame(
         {
             "시설구분": fac_type_by_org,
             "연면적": area_by_org,
@@ -273,21 +394,17 @@ def _compute_org_level_current_metrics(
         }
     )
 
-    # ✅ 시설별 평균 면적 대비 에너지 사용비율
-    #   = (기관별 연면적/사용량) ÷ (해당 시설구분의 평균 연면적/사용량)
+    # 시설별 평균 면적 대비 에너지 사용비율
     facility_mean = df_org.groupby("시설구분", dropna=False)[
         "면적대비 에너지 사용비율"
     ].transform("mean")
     df_org["시설별 평균 면적 대비 에너지 사용비율"] = (
-        df_org["면적대비 에너지 사용비율"] /
-        facility_mean.replace(0, np.nan)
+        df_org["면적대비 에너지 사용비율"]
+        / facility_mean.replace(0, np.nan)
     )
 
-    # 기관 고정 순서 적용
-    df_org = df_org.reindex(org_order)
-    baseline_cur = baseline_cur.reindex(org_order)
+    return df_org, avg3
 
-    return df_org, baseline_cur
 
 
 
