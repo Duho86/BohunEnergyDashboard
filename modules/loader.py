@@ -222,7 +222,16 @@ def get_year_to_file() -> Dict[int, object]:
 
 
 def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
-    """연도별 엑셀 시트를 df_raw 형식으로 변환한다."""
+    """연도별 엑셀 시트를 df_raw 형식으로 변환한다.
+
+    출력 df_raw 컬럼:
+      - 연도, year
+      - 기관명, org_name
+      - 시설구분(의료/복지/기타)
+      - 연면적
+      - 연단위(연간 사용량)
+      - 1월~12월: 월별 에너지 사용량 (엑셀 헤더명을 그대로 사용)
+    """
 
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
@@ -245,15 +254,11 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     # 2) 집계 행 제거: '합계', '합 계', '소계', '소 계' 모두 제거
     # -------------------------------------------------------
     org_all = df[org_col].astype(str).str.strip()
-
-    # 공백 제거 후 비교 (예: "합 계" → "합계")
     org_norm = org_all.str.replace(r"\s+", "", regex=True)
 
     summary_keywords = {"합계", "소계"}
-
     mask_exact = org_norm.isin(summary_keywords)
     mask_regex = org_all.str.contains(r"(합\s*계|소\s*계)", regex=True)
-
     drop_mask = mask_exact | mask_regex
 
     if drop_mask.any():
@@ -263,15 +268,43 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     org_series = df[org_col].astype(str).str.strip()
 
     # -------------------------------------------------------
-    # 3) 숫자 컬럼 정규화
+    # 3) 1월~12월 월별 사용량 컬럼 탐지 및 숫자화
+    # -------------------------------------------------------
+    # '1월', '1 월', '1월 사용량' 등 다양한 헤더를 허용
+    month_col_map: dict[int, str] = {}
+    for c in df.columns:
+        m = re.search(r"(\d{1,2})\s*월", str(c))
+        if not m:
+            continue
+        month_num = int(m.group(1))
+        if 1 <= month_num <= 12 and month_num not in month_col_map:
+            month_col_map[month_num] = c
+
+    missing_months = [m for m in range(1, 13) if m not in month_col_map]
+    if missing_months:
+        # 엑셀 구조가 깨진 경우를 바로 알 수 있도록 명시적 에러
+        found = {m: col for m, col in sorted(month_col_map.items())}
+        raise ValueError(
+            f"{year}년 엑셀에서 1~12월 사용량 컬럼을 모두 찾지 못했습니다. "
+            f"누락 월: {missing_months}, 탐지된 월/컬럼: {found}"
+        )
+
+    # 원본 헤더 이름 그대로 사용하면서 숫자로 변환 (NaN은 0으로 처리)
+    month_series_map: dict[str, pd.Series] = {}
+    for m in range(1, 13):
+        col = month_col_map[m]
+        s = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        month_series_map[col] = s
+
+    # -------------------------------------------------------
+    # 4) 숫자 컬럼 정규화 (연면적, 연단위)
     # -------------------------------------------------------
     area_raw = pd.to_numeric(df[area_col], errors="coerce")
     area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max()))
-
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
     # -------------------------------------------------------
-    # 4) 시설군 매핑
+    # 5) 시설군 매핑
     # -------------------------------------------------------
     org_unique = set(org_series.unique())
 
@@ -279,13 +312,11 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
         n = re.sub(r"\s+", "", str(name))
         return (n in summary_keywords) or ("합계" in n) or ("소계" in n)
 
-    # '합계', '소계'는 제외한 후 실제 미매핑 기관만 남김
     unknown_orgs = sorted(
         o for o in org_unique
         if (o not in ORG_FACILITY_GROUP) and (not _is_summary_name(o))
     )
 
-    # 기관당 1번만 경고
     new_unknowns = [
         o for o in unknown_orgs if o not in WARNED_UNKNOWN_FACILITY_ORGS
     ]
@@ -299,21 +330,23 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
 
     # -------------------------------------------------------
-    # 5) df_raw 구성
+    # 6) df_raw 구성: 기본 컬럼 + 월별 컬럼
     # -------------------------------------------------------
-    df_raw = pd.DataFrame(
-        {
-            "연도": int(year),
-            "year": int(year),
-            "기관명": org_series,
-            "org_name": org_series,
-            "시설구분": facility_group,
-            "연면적": area,
-            "연단위": annual_usage,
-        }
-    )
+    data: dict[str, object] = {
+        "연도": int(year),
+        "year": int(year),
+        "기관명": org_series,
+        "org_name": org_series,
+        "시설구분": facility_group,
+        "연면적": area,
+        "연단위": annual_usage,
+    }
+    # 월별 컬럼 추가 (키는 엑셀 헤더명, 예: '1월', '2월', …)
+    data.update(month_series_map)
 
+    df_raw = pd.DataFrame(data)
     return df_raw
+
 
 
 def load_energy_files(
