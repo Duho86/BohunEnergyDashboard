@@ -934,17 +934,17 @@ def render_dashboard_tab(
         summary_text = "* 종합분석 정보를 불러오는 중 오류가 발생했습니다."
 
     # (2) 에너지 절감을 위한 제안 (고정 텍스트 – GPT 판단 기반 템플릿)
-    st.markdown("**1. 공단 전체 기준**")
-    st.dataframe(df3_overall_fmt, use_container_width=True)
+    #st.markdown("**1. 공단 전체 기준**")
+    #st.dataframe(df3_overall_fmt, use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("**2. 소속기구별**")
-    st.dataframe(df3_by_org_fmt, use_container_width=True)
+    #st.markdown("---")
+    #st.markdown("**2. 소속기구별**")
+    #st.dataframe(df3_by_org_fmt, use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
-    df3_detail = data3.detail.copy().reindex(org_order)
-    st.dataframe(df3_detail, use_container_width=True)
+    #st.markdown("---")
+    #st.markdown("**3. 에너지 사용량 관리 대상 상세**")
+    #df3_detail = data3.detail.copy().reindex(org_order)
+    #st.dataframe(df3_detail, use_container_width=True)
 
     # ---------------------------------------------------
     # 4. AI 제안 피드백 (자동 생성 텍스트)
