@@ -1,5 +1,25 @@
 # app.py
 
+# -----------------------------------------------------------
+# Streamlit rerun helper (버전별 experimental_rerun / rerun 호환)
+# -----------------------------------------------------------
+def safe_rerun() -> None:
+    """Streamlit 버전에 따라 rerun 함수를 안전하게 호출한다."""
+    try:
+        import streamlit as _st  # 로컬 별칭
+    except ImportError:
+        return
+
+    # 최신 버전: st.rerun 존재
+    if hasattr(_st, "rerun"):
+        _st.rerun()
+    # 구 버전 호환: experimental_rerun 만 있는 경우
+    elif hasattr(_st, "experimental_rerun"):
+        _st.experimental_rerun()
+    # 둘 다 없으면 아무 것도 하지 않음
+    else:
+        return
+
 from __future__ import annotations
 
 import re
@@ -1048,7 +1068,7 @@ def render_upload_tab(
                     st.success(f"기존 연도 파일 업데이트 완료: {years_str}년")
 
                 # 다른 탭/그래프에서도 즉시 반영되도록 재실행
-                st.experimental_rerun()
+                safe_rerun()
 
             except Exception as e:
                 st.error("에너지 사용량 파일 로딩 중 오류가 발생했습니다. 엑셀 형식과 시트를 확인해 주세요.")
@@ -1080,7 +1100,7 @@ def render_upload_tab(
 
             st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
 
-            st.experimental_rerun()
+            safe_rerun()
 
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
