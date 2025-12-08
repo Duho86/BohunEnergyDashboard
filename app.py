@@ -66,16 +66,29 @@ def infer_year_from_filename(name: str) -> Optional[int]:
 # data/ 폴더 검색 (로컬 자동 인식)
 # ===========================================================
 def discover_local_energy_files() -> Dict[int, Path]:
+    """data/ 폴더에서 연도 정보를 가진 엑셀 파일을 찾아 {연도: Path} 매핑 생성.
+
+    동일 연도에 여러 파일이 있을 경우 **가장 최근에 수정된 파일**을 선택한다.
+    (예: 사용자가 2024년 파일을 다시 업로드하여 교체한 경우 최신 파일 사용)
+    """
     mapping: Dict[int, Path] = {}
     if not DATA_DIR.is_dir():
         return mapping
 
+    candidates: Dict[int, list[Path]] = {}
     for p in DATA_DIR.glob("*.xlsx"):
         y = infer_year_from_filename(p.name)
-        if y:
-            mapping.setdefault(y, p)
+        if not y:
+            continue
+        candidates.setdefault(y, []).append(p)
+
+    for y, paths in candidates.items():
+        # mtime 기준 가장 최신 파일 선택
+        latest = max(paths, key=lambda pp: pp.stat().st_mtime)
+        mapping[y] = latest
 
     return mapping
+
 
 
 # ===========================================================
@@ -974,7 +987,7 @@ def render_upload_tab(
 
     st.write(
         "- 연도별 《에너지 사용량관리.xlsx》 파일을 업로드하면, "
-        "df_raw(연단위 기준)로 변환하여 분석에 사용합니다."
+        "df_raw(U/V/W 기반이 아닌 연단위 기준)로 변환하여 분석에 사용합니다."
     )
 
     # 1) 파일 업로드 위젯
@@ -984,18 +997,63 @@ def render_upload_tab(
         accept_multiple_files=True,
     )
 
-    # 2) 세션 상태에 업로드 파일 반영
+    # 2) 업로드된 파일을 data/ 폴더에 즉시 저장(연도 기준) + 캐시 갱신
     if uploaded_files:
-        year_to_file_session: Dict[int, object] = st.session_state.get(
-            "year_to_file", {}
-        )
+        if not DATA_DIR.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 업로드 이전에 존재하던 로컬 파일 목록(연도 기준)
+        local_before = discover_local_energy_files()
+        before_years = set(local_before.keys())
+
+        new_years: list[int] = []
+        updated_years: list[int] = []
+
         for f in uploaded_files:
             year = infer_year_from_filename(f.name)
             if year is None:
                 st.warning(f"연도를 찾을 수 없어 무시된 파일: {f.name}")
                 continue
-            year_to_file_session[year] = f
-        st.session_state["year_to_file"] = year_to_file_session
+
+            # 동일 연도는 항상 덮어쓰기(override)
+            target_path = DATA_DIR / f"energy_{year}.xlsx"
+            if year in before_years:
+                updated_years.append(year)
+            else:
+                new_years.append(year)
+
+            # 파일 저장
+            with open(target_path, "wb") as out:
+                out.write(f.getvalue())
+
+        # 세션 업로드 캐시는 더 이상 사용하지 않으므로 비움
+        st.session_state["year_to_file"] = {}
+
+        # 저장된 파일 기준으로 year_to_file / year_to_raw / df_raw_all 캐시를 다시 생성
+        merged = get_year_to_file()
+        if merged:
+            try:
+                year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
+                df_raw_all = df_raw_all_tmp
+
+                st.session_state["year_to_raw_cache"] = year_to_raw_tmp
+                st.session_state["df_raw_all_cache"] = df_raw_all_tmp
+
+                # 안내 메시지
+                if new_years:
+                    years_str = ", ".join(str(y) for y in sorted(set(new_years)))
+                    st.success(f"새 연도 파일 등록 완료: {years_str}년")
+                if updated_years:
+                    years_str = ", ".join(str(y) for y in sorted(set(updated_years)))
+                    st.success(f"기존 연도 파일 업데이트 완료: {years_str}년")
+
+                # 다른 탭/그래프에서도 즉시 반영되도록 재실행
+                st.experimental_rerun()
+
+            except Exception as e:
+                st.error("에너지 사용량 파일 로딩 중 오류가 발생했습니다. 엑셀 형식과 시트를 확인해 주세요.")
+                st.exception(e)
+                return
 
     # 3) 현재 인식된 파일 목록 표시
     st.markdown("#### 인식된 연도별 파일 목록")
@@ -1011,7 +1069,7 @@ def render_upload_tab(
 
     st.markdown("---")
 
-    # 4) df_raw_all 이 비어 있으면 여기서 한 번 더 로딩을 시도 (안전장치)
+    # 4) df_raw_all 이 아직 없는 경우, 로컬 파일 기준으로 한 번 더 로딩 시도
     if (df_raw_all is None or df_raw_all.empty) and merged:
         try:
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
@@ -1021,7 +1079,9 @@ def render_upload_tab(
             st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
             st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
+
             st.experimental_rerun()
+
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
@@ -1029,7 +1089,7 @@ def render_upload_tab(
 
     # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
     if df_raw_all is None or df_raw_all.empty:
-        st.info("아직 df_raw 데이터가 없어 백데이터 분석 표를 생성할 수 없습니다.")
+        st.info("아직 분석 가능한 df_raw 데이터가 없습니다. 먼저 연도별 파일을 업로드해 주세요.")
         return
 
     # 6) data_1용 표 생성
@@ -1040,13 +1100,16 @@ def render_upload_tab(
         st.exception(e)
         return
 
+    # 공통: '구분' 컬럼은 포맷 적용 안 함 (연도 문자열 그대로)
     no_format_for_label = {"구분": ""}
 
+    # 7) 표 렌더링
     st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
     tbl_usage_fmt = format_table(
         tbl_usage,
         fmt_rules,
         column_fmt_map=no_format_for_label,
+        # 숫자: 정수 + 천단위 콤마, 단위 없음
         default_fmt_name="integer_comma",
     )
     st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
@@ -1070,6 +1133,7 @@ def render_upload_tab(
         default_fmt_name="integer_comma",
     )
     st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
+
 
 
 # ===========================================================
