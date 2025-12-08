@@ -132,6 +132,7 @@ ORG_FACILITY_GROUP: Dict[str, str] = {
     "보훈원": "기타시설",
     "보훈재활체육센터": "기타시설",
     "보훈휴양원": "기타시설",
+    WARNED_UNKNOWN_FACILITY_ORGS: set[str] = set()
 }
 
 
@@ -237,7 +238,6 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
       - 시설구분 (의료시설/복지시설/기타시설로 재매핑)
       - 연면적
       - 연단위  (연간 에너지 사용량)
-      - (추가) 엑셀에 존재하는 1월~12월 컬럼을 그대로 보존
     """
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
@@ -256,7 +256,17 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             f"현재 컬럼: {list(df.columns)}"
         )
 
-    # 기관명
+    # ─────────────────────────────────────────────
+    # 1) 집계 행(합계/소계 등) 제거
+    # ─────────────────────────────────────────────
+    org_series_all = df[org_col].astype(str).str.strip()
+    org_norm = org_series_all.str.replace(r"\s+", "", regex=True)
+    summary_mask = org_norm.isin({"합계", "소계"})
+    if summary_mask.any():
+        # 분석 대상에서 제외
+        df = df.loc[~summary_mask].copy()
+
+    # 이후부터는 집계 행이 제거된 df 를 기준으로 다시 계산
     org_series = df[org_col].astype(str).str.strip()
 
     # 원본 시설구분(엑셀 값) – 필요 시 디버그용
@@ -269,42 +279,38 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     # 연간 사용량(연단위)
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
-    # 1월~12월 컬럼(있으면 df_raw에 그대로 보존)
-    month_pattern = re.compile(r"^\s*(\d{1,2})월\s*$")
-    month_cols = [c for c in df.columns if month_pattern.match(str(c))]
-    month_data: Dict[str, pd.Series] = {}
-    for c in month_cols:
-        month_data[c] = pd.to_numeric(df[c], errors="coerce")
-
     # 기관명 → 시설군(의료/복지/기타) 매핑
     org_unique = set(org_series.unique())
     unknown_orgs = sorted(org_unique.difference(ORG_FACILITY_GROUP.keys()))
     if unknown_orgs:
-        # 매핑 안 된 기관은 기타시설로 처리하되, 한 번 경고
-        _log_warning(
-            "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
-            + ", ".join(unknown_orgs)
-        )
+        # 이번 세션에서 아직 경고하지 않은 기관만 필터링
+        new_unknowns = [
+            o for o in unknown_orgs if o not in WARNED_UNKNOWN_FACILITY_ORGS
+        ]
+        if new_unknowns:
+            _log_warning(
+                "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
+                + ", ".join(new_unknowns)
+            )
+            WARNED_UNKNOWN_FACILITY_ORGS.update(new_unknowns)
 
     facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
 
     # df_raw 구성
-    data = {
-        "연도": int(year),
-        "year": int(year),
-        "기관명": org_series,
-        "org_name": org_series,
-        "시설구분": facility_group,
-        "연면적": area,
-        "연단위": annual_usage,
-    }
-    df_raw = pd.DataFrame(data)
-
-    # 월별 사용량 컬럼 추가
-    for col_name, series in month_data.items():
-        df_raw[col_name] = series
+    df_raw = pd.DataFrame(
+        {
+            "연도": int(year),
+            "year": int(year),
+            "기관명": org_series,
+            "org_name": org_series,
+            "시설구분": facility_group,
+            "연면적": area,
+            "연단위": annual_usage,
+        }
+    )
 
     return df_raw
+
 
 
 def load_energy_files(
