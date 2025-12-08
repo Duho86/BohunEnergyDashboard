@@ -552,57 +552,76 @@ def compute_facility_feedback(
 # data_1 : 백데이터 분석 테이블 생성 (안전 복원 버전)
 # ===========================================================
 
+# ===========================================================
+# data_1 (업로드 탭용) 테이블 생성
+# ===========================================================
 def build_data1_tables(df_raw_all: pd.DataFrame):
     """
-    data_1 : 기본 백데이터 분석 테이블 3종을 생성한다.
-    ※ 계산에 영향을 주지 않는 구조적 pivot만 수행하므로
-      data_2(data_2_usage_analysis) / data_3(feedback)에는 영향 없음.
+    업로드 탭에서 사용하는 3개 표:
+      1) 연도×기관 에너지 사용량(연단위)
+      2) 연도×기관 연면적
+      3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
     """
+    df = df_raw_all.copy()
 
-    if df_raw_all is None or df_raw_all.empty:
-        raise ValueError("df_raw_all 이 비어 있어 data_1 분석을 생성할 수 없습니다.")
+    years = sorted(df["연도"].unique())
+    org_order = list(get_org_order())
 
-    # 1. 연도×기관 에너지 사용량 (연단위)
-    tbl_usage = (
-        df_raw_all
-        .pivot_table(
+    # 1) 연도×기관 에너지 사용량 (연단위)
+    usage = (
+        df.pivot_table(
             index="연도",
             columns="기관명",
             values="연단위",
             aggfunc="sum",
             fill_value=0,
         )
-        .reset_index()
+        .reindex(index=years)
+        .reindex(columns=org_order)
     )
+    usage["합계"] = usage.sum(axis=1)
 
-    # 2. 연도×기관 연면적
-    tbl_area = (
-        df_raw_all
-        .pivot_table(
+    # 2) 연도×기관 연면적
+    area = (
+        df.pivot_table(
             index="연도",
             columns="기관명",
             values="연면적",
-            aggfunc="max",  # 연면적은 기관별로 고정값이므로 max/first 동일
+            aggfunc="max",
             fill_value=0,
         )
-        .reset_index()
+        .reindex(index=years)
+        .reindex(columns=org_order)
+    )
+    area["합계"] = area.sum(axis=1)
+
+    # 3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
+    avg3 = pd.DataFrame(index=years, columns=usage.columns, dtype=float)
+    for y in years:
+        prev_years = [py for py in years if py < y][-3:]
+        if not prev_years:
+            baseline = usage.loc[y]
+        else:
+            baseline = usage.loc[prev_years].mean()
+        avg3.loc[y] = baseline
+
+    def _reset_index_as_label(df_in: pd.DataFrame) -> pd.DataFrame:
+        out = df_in.copy()
+        out.insert(0, "구분", out.index.astype(str))
+        return out.reset_index(drop=True)
+
+    return (
+        _reset_index_as_label(usage),
+        _reset_index_as_label(area),
+        _reset_index_as_label(avg3),
     )
 
-    # 3. 연도별 3개년 평균 에너지 사용량
-    # 3개년 평균 = 각 기관 연단위 합 → 연도별 rolling(3).mean()
-    annual_total_by_year = (
-        df_raw_all.groupby("연도")["연단위"].sum().sort_index()
-    )
 
-    avg3 = annual_total_by_year.rolling(window=3).mean()
-
-    tbl_avg3 = (
-        pd.DataFrame({
-            "연도": annual_total_by_year.index,
-            "3개년 평균 에너지 사용량": avg3.values,
-        })
-        .fillna(0)
-    )
-
-    return tbl_usage, tbl_area, tbl_avg3
+# 🔁 옛날 이름 호환용 래퍼 (계산은 전부 build_data1_tables에 위임)
+def build_datal_tables(df_raw_all: pd.DataFrame):
+    """
+    구버전 코드 호환용: 예전 이름(build_datal_tables)으로 호출하더라도
+    동일한 data_1 테이블을 반환한다.
+    """
+    return build_data1_tables(df_raw_all)
 
