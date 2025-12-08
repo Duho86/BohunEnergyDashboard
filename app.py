@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
 
 # 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
 try:
@@ -998,6 +1000,26 @@ def render_dashboard_tab(
 # ===========================================================
 # 📂 업로드 탭 렌더링
 # ===========================================================
+def _compute_upload_signature(uploaded_files) -> Optional[str]:
+    """
+    업로드된 파일 목록에 대한 '변경 여부' 식별용 시그니처.
+
+    - 파일명 + 파일 크기 + 내용(md5)을 합쳐 해시
+    - 같은 파일 세트면 시그니처도 항상 동일
+    """
+    if not uploaded_files:
+        return None
+
+    parts = []
+    for f in uploaded_files:
+        data = f.getvalue()
+        h = hashlib.md5(data).hexdigest()
+        parts.append(f"{f.name}:{len(data)}:{h}")
+    parts.sort()
+    joined = "|".join(parts)
+    return hashlib.md5(joined.encode("utf-8")).hexdigest()
+
+
 def render_upload_tab(
     spec: dict,
     fmt_rules: Mapping[str, Mapping],
@@ -1017,49 +1039,54 @@ def render_upload_tab(
         accept_multiple_files=True,
     )
 
-    # 2) 업로드된 파일을 data/ 폴더에 즉시 저장(연도 기준) + 캐시 갱신
-    if uploaded_files:
+    # 현재 업로드 세트의 시그니처 계산
+    current_sig = _compute_upload_signature(uploaded_files) if uploaded_files else None
+    last_sig = st.session_state.get("last_upload_sig")
+
+    # 2) 새 업로드 세트일 때만 처리 (== 1회 처리 보장)
+    if uploaded_files and current_sig and current_sig != last_sig:
         if not DATA_DIR.exists():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         # 업로드 이전에 존재하던 로컬 파일 목록(연도 기준)
+        from modules.loader import discover_local_energy_files, get_year_to_file, load_energy_files
+
         local_before = discover_local_energy_files()
         before_years = set(local_before.keys())
 
         new_years: list[int] = []
         updated_years: list[int] = []
 
+        # 2-1) 파일 저장 (연도별로 항상 덮어쓰기)
         for f in uploaded_files:
             year = infer_year_from_filename(f.name)
             if year is None:
                 st.warning(f"연도를 찾을 수 없어 무시된 파일: {f.name}")
                 continue
 
-            # 동일 연도는 항상 덮어쓰기(override)
             target_path = DATA_DIR / f"energy_{year}.xlsx"
             if year in before_years:
                 updated_years.append(year)
             else:
                 new_years.append(year)
 
-            # 파일 저장
             with open(target_path, "wb") as out:
                 out.write(f.getvalue())
 
         # 세션 업로드 캐시는 더 이상 사용하지 않으므로 비움
         st.session_state["year_to_file"] = {}
 
-        # 저장된 파일 기준으로 year_to_file / year_to_raw / df_raw_all 캐시를 다시 생성
+        # 2-2) 저장된 파일 기준으로 year_to_raw / df_raw_all 캐시 재생성
         merged = get_year_to_file()
         if merged:
             try:
                 year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-                df_raw_all = df_raw_all_tmp
 
                 st.session_state["year_to_raw_cache"] = year_to_raw_tmp
                 st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
-                # 안내 메시지
+                df_raw_all = df_raw_all_tmp
+
                 if new_years:
                     years_str = ", ".join(str(y) for y in sorted(set(new_years)))
                     st.success(f"새 연도 파일 등록 완료: {years_str}년")
@@ -1067,15 +1094,23 @@ def render_upload_tab(
                     years_str = ", ".join(str(y) for y in sorted(set(updated_years)))
                     st.success(f"기존 연도 파일 업데이트 완료: {years_str}년")
 
-                # 다른 탭/그래프에서도 즉시 반영되도록 재실행
-                safe_rerun()
+                # 이 업로드 세트는 처리 완료 → 같은 세트는 다시 처리하지 않도록 기록
+                st.session_state["last_upload_sig"] = current_sig
 
             except Exception as e:
-                st.error("에너지 사용량 파일 로딩 중 오류가 발생했습니다. 엑셀 형식과 시트를 확인해 주세요.")
+                st.error(
+                    "에너지 사용량 파일 로딩 중 오류가 발생했습니다. "
+                    "엑셀 형식과 시트를 확인해 주세요."
+                )
                 st.exception(e)
                 return
 
+    # 이미 처리된 업로드 세트라면(= current_sig == last_sig) 추가 연산 생략
+    # → Streamlit 기본 rerun 1회만 일어나고, load_energy_files 재호출 없음
+
     # 3) 현재 인식된 파일 목록 표시
+    from modules.loader import get_year_to_file, load_energy_files
+
     st.markdown("#### 인식된 연도별 파일 목록")
     merged = get_year_to_file()
     if not merged:
@@ -1085,23 +1120,21 @@ def render_upload_tab(
             {"연도": year, "파일명": getattr(f, "name", str(f))}
             for year, f in sorted(merged.items())
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
-    # 4) df_raw_all 이 아직 없는 경우, 로컬 파일 기준으로 한 번 더 로딩 시도
+    # 4) df_raw_all 이 아직 없으면 (최초 실행) 로컬 파일 기준으로 한 번만 로딩
     if (df_raw_all is None or df_raw_all.empty) and merged:
         try:
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-            df_raw_all = df_raw_all_tmp
 
             st.session_state["year_to_raw_cache"] = year_to_raw_tmp
             st.session_state["df_raw_all_cache"] = df_raw_all_tmp
 
+            df_raw_all = df_raw_all_tmp
+
             st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
-
-            safe_rerun()
-
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
@@ -1112,24 +1145,23 @@ def render_upload_tab(
         st.info("아직 분석 가능한 df_raw 데이터가 없습니다. 먼저 연도별 파일을 업로드해 주세요.")
         return
 
-    # 6) data_1용 표 생성
+    # 6) data_1용 백데이터 분석 표 생성
     try:
+        from modules.analyzer import build_data1_tables
+
         tbl_usage, tbl_area, tbl_avg3 = build_data1_tables(df_raw_all)
     except Exception as e:
         st.error("data_1(백데이터 분석) 표 생성 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
-    # 공통: '구분' 컬럼은 포맷 적용 안 함 (연도 문자열 그대로)
     no_format_for_label = {"구분": ""}
 
-    # 7) 표 렌더링
     st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
     tbl_usage_fmt = format_table(
         tbl_usage,
         fmt_rules,
         column_fmt_map=no_format_for_label,
-        # 숫자: 정수 + 천단위 콤마, 단위 없음
         default_fmt_name="integer_comma",
     )
     st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
@@ -1153,7 +1185,6 @@ def render_upload_tab(
         default_fmt_name="integer_comma",
     )
     st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
-
 
 
 # ===========================================================
