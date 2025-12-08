@@ -109,6 +109,9 @@ def get_org_order() -> Tuple[str, ...]:
 # 기관별 시설군(의료/복지/기타) 매핑
 # ===========================================================
 
+# 시설군 매핑이 정의되지 않은 기관명을 한 번만 경고하기 위한 전역 캐시
+WARNED_UNKNOWN_FACILITY_ORGS: set[str] = set()
+
 ORG_FACILITY_GROUP: Dict[str, str] = {
     # 의료시설
     "중앙보훈병원": "의료시설",
@@ -132,7 +135,6 @@ ORG_FACILITY_GROUP: Dict[str, str] = {
     "보훈원": "기타시설",
     "보훈재활체육센터": "기타시설",
     "보훈휴양원": "기타시설",
-    WARNED_UNKNOWN_FACILITY_ORGS: set[str] = set()
 }
 
 
@@ -220,83 +222,85 @@ def get_year_to_file() -> Dict[int, object]:
 
 
 def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
-    """연도별 엑셀 시트를 df_raw 형식으로 변환한다.
+    """연도별 엑셀 시트를 df_raw 형식으로 변환한다."""
 
-    입력 엑셀(현재 템플릿 예시):
-      - 소속기관명
-      - 시설내역
-      - 연면적/설비용량
-      - 시설구분
-      - 1월~12월
-      - 연단위
-      - 온실가스 환산량(tco2eq)
-      - 면적당 온실가스 배출량
-
-    출력 df_raw:
-      - 연도, year
-      - 기관명, org_name  (소속기관명과 동일)
-      - 시설구분 (의료시설/복지시설/기타시설로 재매핑)
-      - 연면적
-      - 연단위  (연간 에너지 사용량)
-    """
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
 
-    # 헤더/컬럼 정규화
+    # -------------------------------------------------------
+    # 1) 헤더 정규화
+    # -------------------------------------------------------
     df = _normalize_columns(df_original)
 
-    # 핵심 컬럼 이름 탐색 (후보 중 존재하는 것 사용)
     org_col = _find_first_existing_column(df, ORG_COL_CANDIDATES)
     area_col = _find_first_existing_column(df, AREA_COL_CANDIDATES)
     annual_col = _find_first_existing_column(df, ANNUAL_USAGE_COL_CANDIDATES)
 
     if FACILITY_TYPE_COL not in df.columns:
         raise ValueError(
-            f"필수 컬럼 '{FACILITY_TYPE_COL}'(시설구분)을 찾을 수 없습니다. "
-            f"현재 컬럼: {list(df.columns)}"
+            f"필수 컬럼 '{FACILITY_TYPE_COL}'(시설구분)을 찾을 수 없습니다."
         )
 
-    # ─────────────────────────────────────────────
-    # 1) 집계 행(합계/소계 등) 제거
-    # ─────────────────────────────────────────────
-    org_series_all = df[org_col].astype(str).str.strip()
-    org_norm = org_series_all.str.replace(r"\s+", "", regex=True)
-    summary_mask = org_norm.isin({"합계", "소계"})
-    if summary_mask.any():
-        # 분석 대상에서 제외
-        df = df.loc[~summary_mask].copy()
+    # -------------------------------------------------------
+    # 2) 집계 행 제거: '합계', '합 계', '소계', '소 계' 모두 제거
+    # -------------------------------------------------------
+    org_all = df[org_col].astype(str).str.strip()
 
-    # 이후부터는 집계 행이 제거된 df 를 기준으로 다시 계산
+    # 공백 제거 후 비교 (예: "합 계" → "합계")
+    org_norm = org_all.str.replace(r"\s+", "", regex=True)
+
+    summary_keywords = {"합계", "소계"}
+
+    mask_exact = org_norm.isin(summary_keywords)
+    mask_regex = org_all.str.contains(r"(합\s*계|소\s*계)", regex=True)
+
+    drop_mask = mask_exact | mask_regex
+
+    if drop_mask.any():
+        df = df.loc[~drop_mask].copy()
+
+    # 집계행 제거 후 기관명 다시 재계산
     org_series = df[org_col].astype(str).str.strip()
 
-    # 원본 시설구분(엑셀 값) – 필요 시 디버그용
-    facility_type_raw = df[FACILITY_TYPE_COL].astype(str).str.strip()
-
-    # 연면적: 숫자화 후, 같은 기관 내 NaN 은 해당 기관의 최대값(보통 전기 줄)을 사용
+    # -------------------------------------------------------
+    # 3) 숫자 컬럼 정규화
+    # -------------------------------------------------------
     area_raw = pd.to_numeric(df[area_col], errors="coerce")
     area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max()))
 
-    # 연간 사용량(연단위)
     annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
 
-    # 기관명 → 시설군(의료/복지/기타) 매핑
+    # -------------------------------------------------------
+    # 4) 시설군 매핑
+    # -------------------------------------------------------
     org_unique = set(org_series.unique())
-    unknown_orgs = sorted(org_unique.difference(ORG_FACILITY_GROUP.keys()))
-    if unknown_orgs:
-        # 이번 세션에서 아직 경고하지 않은 기관만 필터링
-        new_unknowns = [
-            o for o in unknown_orgs if o not in WARNED_UNKNOWN_FACILITY_ORGS
-        ]
-        if new_unknowns:
-            _log_warning(
-                "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
-                + ", ".join(new_unknowns)
-            )
-            WARNED_UNKNOWN_FACILITY_ORGS.update(new_unknowns)
+
+    def _is_summary_name(name: str) -> bool:
+        n = re.sub(r"\s+", "", str(name))
+        return (n in summary_keywords) or ("합계" in n) or ("소계" in n)
+
+    # '합계', '소계'는 제외한 후 실제 미매핑 기관만 남김
+    unknown_orgs = sorted(
+        o for o in org_unique
+        if (o not in ORG_FACILITY_GROUP) and (not _is_summary_name(o))
+    )
+
+    # 기관당 1번만 경고
+    new_unknowns = [
+        o for o in unknown_orgs if o not in WARNED_UNKNOWN_FACILITY_ORGS
+    ]
+    if new_unknowns:
+        _log_warning(
+            "시설군 매핑이 정의되지 않은 기관이 있습니다. '기타시설'로 처리합니다: "
+            + ", ".join(new_unknowns)
+        )
+        WARNED_UNKNOWN_FACILITY_ORGS.update(new_unknowns)
 
     facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
 
-    # df_raw 구성
+    # -------------------------------------------------------
+    # 5) df_raw 구성
+    # -------------------------------------------------------
     df_raw = pd.DataFrame(
         {
             "연도": int(year),
@@ -310,7 +314,6 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     )
 
     return df_raw
-
 
 
 def load_energy_files(
