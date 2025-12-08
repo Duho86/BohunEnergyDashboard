@@ -1,5 +1,22 @@
 # app.py
 
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Dict, Mapping, Optional
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
+try:
+    import altair as alt
+    ALT_AVAILABLE = True
+except ImportError:
+    ALT_AVAILABLE = False
+    
 # -----------------------------------------------------------
 # Streamlit rerun helper (버전별 experimental_rerun / rerun 호환)
 # -----------------------------------------------------------
@@ -19,23 +36,6 @@ def safe_rerun() -> None:
     # 둘 다 없으면 아무 것도 하지 않음
     else:
         return
-
-from __future__ import annotations
-
-import re
-from pathlib import Path
-from typing import Dict, Mapping, Optional
-
-import numpy as np
-import pandas as pd
-import streamlit as st
-
-# 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
-try:
-    import altair as alt
-    ALT_AVAILABLE = True
-except ImportError:
-    ALT_AVAILABLE = False
 
 
 # ===========================================================
