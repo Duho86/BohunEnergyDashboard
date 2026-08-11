@@ -865,11 +865,11 @@ def render_dashboard_tab(
 
             st.bar_chart(
                 quarter_chart_df[
-                    [
-                        "1분기",
-                        "2분기",
-                        "3분기",
+                  [
                         "4분기",
+                        "3분기",
+                        "2분기",
+                        "1분기",
                     ]
                 ],
                 use_container_width=True,
