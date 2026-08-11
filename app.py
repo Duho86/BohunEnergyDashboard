@@ -660,6 +660,66 @@ def render_dashboard_tab(
                 else:
                     st.bar_chart(yearly)
 
+    # 반기별 / 분기별 에너지 사용량 추이
+    col_g3, col_g4 = st.columns(2)
+
+    def _selected_year_monthly_totals() -> pd.Series:
+        if df_all.empty or "연도" not in df_all.columns:
+            return pd.Series(dtype=float)
+
+        df_selected = df_all[df_all["연도"] == selected_year].copy()
+        if df_selected.empty:
+            return pd.Series(dtype=float)
+
+        month_map: Dict[int, str] = {}
+        for c in df_selected.columns:
+            m = re.search(r"(\d{1,2})\s*월", str(c))
+            if m:
+                month_num = int(m.group(1))
+                if 1 <= month_num <= 12 and month_num not in month_map:
+                    month_map[month_num] = c
+
+        if len(month_map) < 12:
+            return pd.Series(dtype=float)
+
+        values = {}
+        for month_num in range(1, 13):
+            col = month_map[month_num]
+            values[month_num] = pd.to_numeric(
+                df_selected[col], errors="coerce"
+            ).fillna(0).sum()
+        return pd.Series(values, dtype=float)
+
+    monthly_totals = _selected_year_monthly_totals()
+
+    with col_g3:
+        st.markdown("**반기별 에너지 사용량 추이**")
+        if monthly_totals.empty:
+            st.info("반기별 에너지 사용량을 계산할 월별 데이터가 없습니다.")
+        else:
+            half_yearly = pd.Series(
+                {
+                    "상반기": monthly_totals.loc[1:6].sum(),
+                    "하반기": monthly_totals.loc[7:12].sum(),
+                }
+            )
+            st.bar_chart(half_yearly)
+
+    with col_g4:
+        st.markdown("**분기별 에너지 사용량 추이**")
+        if monthly_totals.empty:
+            st.info("분기별 에너지 사용량을 계산할 월별 데이터가 없습니다.")
+        else:
+            quarterly = pd.Series(
+                {
+                    "1분기": monthly_totals.loc[1:3].sum(),
+                    "2분기": monthly_totals.loc[4:6].sum(),
+                    "3분기": monthly_totals.loc[7:9].sum(),
+                    "4분기": monthly_totals.loc[10:12].sum(),
+                }
+            )
+            st.bar_chart(quarterly)
+
     st.markdown("---")
 
     # -------------------------------------------------------
@@ -1257,8 +1317,14 @@ def main() -> None:
     # 현재 인식된 파일 목록
     year_to_file = get_year_to_file()
 
-    # 🔹 파일은 있는데 캐시가 없거나(df_raw_all 이 None/empty) 하면 강제 재로딩
-    if year_to_file and (not year_to_raw or df_raw_all is None or df_raw_all.empty):
+    # 🔹 파일은 있는데 캐시가 없거나, 구버전 캐시(에너지종류 컬럼 없음)이면 강제 재로딩
+    cache_needs_reload = (
+        not year_to_raw
+        or df_raw_all is None
+        or df_raw_all.empty
+        or "에너지종류" not in df_raw_all.columns
+    )
+    if year_to_file and cache_needs_reload:
         try:
             year_to_raw, df_raw_all = load_energy_files(year_to_file)
             st.session_state["year_to_raw_cache"] = year_to_raw
@@ -1295,11 +1361,9 @@ def main() -> None:
         view_mode = st.radio("보기 범위", ["공단 전체", "기관별"], index=0)
 
         if years_available:
-            current_year_spec = int(spec["meta"]["current_year"])
-            if current_year_spec in years_available:
-                default_year = current_year_spec
-            else:
-                default_year = years_available[-1]
+            # 항상 실제 로딩된 데이터 중 가장 최근 이행연도를 기본값으로 사용한다.
+            # master_energy_spec.json의 current_year 값이 오래되어도 최신 업로드 연도가 우선한다.
+            default_year = max(years_available)
 
             selected_year = st.selectbox(
                 "이행연도 선택",
@@ -1335,11 +1399,31 @@ def main() -> None:
             selected_org = None
             st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
 
-        st.selectbox(
+        # 업로드 데이터의 연료/에너지원 구분을 실제 필터 옵션으로 사용한다.
+        energy_order = ["전기", "가스(LNG)", "등유", "지역난방"]
+        if selected_year is not None and df_raw_all is not None and not df_raw_all.empty and "에너지종류" in df_raw_all.columns:
+            energy_values = (
+                df_raw_all.loc[df_raw_all["연도"] == selected_year, "에너지종류"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            available_energy_types = [e for e in energy_order if e in set(energy_values)]
+            extras = sorted(
+                e for e in set(energy_values)
+                if e and e not in energy_order and e != "기타"
+            )
+            available_energy_types.extend(extras)
+            if "기타" in set(energy_values):
+                available_energy_types.append("기타")
+        else:
+            available_energy_types = []
+
+        selected_energy = st.selectbox(
             "에너지 종류",
-            ["전체"],
+            ["전체"] + available_energy_types,
             index=0,
-            help="현재 버전에서는 전체 에너지 사용량 기준으로 계산합니다.",
+            help="업로드 파일의 연료/에너지원 구분에 따라 모든 대시보드 분석을 필터링합니다.",
         )
 
     # -------------------------------------------------------
@@ -1349,18 +1433,25 @@ def main() -> None:
         ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
     )
 
-    # 분석에 사용할 year_to_raw (기관별 보기에서는 선택 기관만 필터링)
-    if (
-        selected_year is not None
-        and view_mode == "기관별"
-        and selected_org is not None
-        and year_to_raw
-    ):
+    # 분석에 사용할 year_to_raw
+    # 기관/에너지 종류 필터를 모든 연도에 동일하게 적용하여 월별·연도별·분기/반기 및 분석표가 일관되게 동작하도록 한다.
+    if year_to_raw:
         filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
         for year, df in year_to_raw.items():
-            sub = df[df["기관명"] == selected_org].copy()
+            sub = df.copy()
+
+            if view_mode == "기관별" and selected_org is not None:
+                sub = sub[sub["기관명"] == selected_org]
+
+            if selected_energy != "전체":
+                if "에너지종류" in sub.columns:
+                    sub = sub[sub["에너지종류"] == selected_energy]
+                else:
+                    sub = sub.iloc[0:0]
+
             if not sub.empty:
                 filtered_year_to_raw[year] = sub
+
         analysis_year_to_raw: Mapping[int, pd.DataFrame] = filtered_year_to_raw
     else:
         analysis_year_to_raw = year_to_raw
