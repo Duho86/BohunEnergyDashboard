@@ -665,68 +665,40 @@ def render_dashboard_tab(
 # 연도별 비교
 # ===========================================================
 
-def _get_period_usage_by_year(
-    source_year_to_raw: Mapping[int, pd.DataFrame],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    연도별 월 사용량을 기준으로
-    반기별 / 분기별 에너지 사용량을 계산한다.
+half_rows = []
+quarter_rows = []
 
-    - 반기:
-        상반기 = 1~6월
-        하반기 = 7~12월
 
-    - 분기:
-        1분기 = 1~3월
-        2분기 = 4~6월
-        3분기 = 7~9월
-        4분기 = 10~12월
+# -----------------------------------------------------------
+# 연도별 반기 / 분기 데이터 계산
+# -----------------------------------------------------------
 
-    source_year_to_raw에는 이미
-    기관 / 에너지 종류 필터가 적용된 데이터를 전달한다.
-    """
+if analysis_year_to_raw:
 
-    half_rows = []
-    quarter_rows = []
+    for year in sorted(analysis_year_to_raw.keys()):
 
-    if not source_year_to_raw:
-        return (
-            pd.DataFrame(
-                columns=["연도", "상반기", "하반기"]
-            ),
-            pd.DataFrame(
-                columns=[
-                    "연도",
-                    "1분기",
-                    "2분기",
-                    "3분기",
-                    "4분기",
-                ]
-            ),
-        )
+        df_period = analysis_year_to_raw.get(year)
 
-    for year in sorted(source_year_to_raw.keys()):
-        df = source_year_to_raw.get(year)
-
-        if df is None or df.empty:
+        if df_period is None or df_period.empty:
             continue
 
         # ---------------------------------------------------
-        # 1~12월 컬럼 탐색
+        # 1~12월 컬럼 찾기
         # ---------------------------------------------------
-        month_cols: Dict[int, str] = {}
+        month_cols = {}
 
         for month in range(1, 13):
-            # 기본 형태: "1월", "2월", ...
+
             exact_col = f"{month}월"
 
-            if exact_col in df.columns:
+            # 가장 일반적인 컬럼명
+            if exact_col in df_period.columns:
                 month_cols[month] = exact_col
                 continue
 
-            # 변형 형태 대응:
-            # "1 월", "1월 사용량" 등
-            for col in df.columns:
+            # "1 월", "1월 사용량" 등의 변형 대응
+            for col in df_period.columns:
+
                 col_text = str(col).strip()
 
                 match = re.fullmatch(
@@ -738,21 +710,22 @@ def _get_period_usage_by_year(
                     month_cols[month] = col
                     break
 
-        # 월 데이터가 부족하면 해당 연도는 차트에서 제외
+        # 12개월 데이터가 전부 있는 연도만 계산
         if len(month_cols) < 12:
             continue
 
         # ---------------------------------------------------
-        # 월별 총 사용량 계산
+        # 월별 사용량 합계
         # ---------------------------------------------------
-        monthly_totals: Dict[int, float] = {}
+        monthly_totals = {}
 
         for month in range(1, 13):
+
             month_col = month_cols[month]
 
             monthly_totals[month] = float(
                 pd.to_numeric(
-                    df[month_col],
+                    df_period[month_col],
                     errors="coerce",
                 )
                 .fillna(0)
@@ -762,14 +735,15 @@ def _get_period_usage_by_year(
         # ---------------------------------------------------
         # 반기별 계산
         # ---------------------------------------------------
+
         first_half = sum(
-            monthly_totals[month]
-            for month in range(1, 7)
+            monthly_totals[m]
+            for m in range(1, 7)
         )
 
         second_half = sum(
-            monthly_totals[month]
-            for month in range(7, 13)
+            monthly_totals[m]
+            for m in range(7, 13)
         )
 
         half_rows.append(
@@ -783,24 +757,25 @@ def _get_period_usage_by_year(
         # ---------------------------------------------------
         # 분기별 계산
         # ---------------------------------------------------
+
         q1 = sum(
-            monthly_totals[month]
-            for month in range(1, 4)
+            monthly_totals[m]
+            for m in range(1, 4)
         )
 
         q2 = sum(
-            monthly_totals[month]
-            for month in range(4, 7)
+            monthly_totals[m]
+            for m in range(4, 7)
         )
 
         q3 = sum(
-            monthly_totals[month]
-            for month in range(7, 10)
+            monthly_totals[m]
+            for m in range(7, 10)
         )
 
         q4 = sum(
-            monthly_totals[month]
-            for month in range(10, 13)
+            monthly_totals[m]
+            for m in range(10, 13)
         )
 
         quarter_rows.append(
@@ -813,43 +788,34 @@ def _get_period_usage_by_year(
             }
         )
 
-    # -------------------------------------------------------
-    # 최종 DataFrame 생성
-    # -------------------------------------------------------
-    half_df = pd.DataFrame(
-        half_rows,
-        columns=[
-            "연도",
-            "상반기",
-            "하반기",
-        ],
-    )
 
-    quarter_df = pd.DataFrame(
-        quarter_rows,
-        columns=[
-            "연도",
-            "1분기",
-            "2분기",
-            "3분기",
-            "4분기",
-        ],
-    )
+# -----------------------------------------------------------
+# DataFrame 생성
+# -----------------------------------------------------------
 
-    return half_df, quarter_df
+half_year_df = pd.DataFrame(
+    half_rows,
+    columns=[
+        "연도",
+        "상반기",
+        "하반기",
+    ],
+)
 
-
-# ===========================================================
-# 현재 필터 조건이 적용된 연도별 데이터로 계산
-# ===========================================================
-
-half_year_df, quarter_year_df = _get_period_usage_by_year(
-    analysis_year_to_raw
+quarter_year_df = pd.DataFrame(
+    quarter_rows,
+    columns=[
+        "연도",
+        "1분기",
+        "2분기",
+        "3분기",
+        "4분기",
+    ],
 )
 
 
 # ===========================================================
-# 차트 영역
+# 차트 출력
 # ===========================================================
 
 col_g3, col_g4 = st.columns(2)
@@ -858,25 +824,28 @@ col_g3, col_g4 = st.columns(2)
 # -----------------------------------------------------------
 # 반기별 에너지 사용량 추이
 # -----------------------------------------------------------
+
 with col_g3:
+
     st.markdown(
         "**반기별 에너지 사용량 추이 (연도별 비교)**"
     )
 
     if half_year_df.empty:
+
         st.info(
             "반기별 에너지 사용량을 계산할 데이터가 없습니다."
         )
 
     else:
+
         half_chart_df = (
             half_year_df
             .copy()
             .set_index("연도")
         )
 
-        # 연도 표기를 문자열로 변경하여
-        # Streamlit이 숫자형 연속축으로 오인하지 않도록 함
+        # 연도는 범주형으로 표시
         half_chart_df.index = (
             half_chart_df.index
             .astype(int)
@@ -897,23 +866,28 @@ with col_g3:
 # -----------------------------------------------------------
 # 분기별 에너지 사용량 추이
 # -----------------------------------------------------------
+
 with col_g4:
+
     st.markdown(
         "**분기별 에너지 사용량 추이 (연도별 비교)**"
     )
 
     if quarter_year_df.empty:
+
         st.info(
             "분기별 에너지 사용량을 계산할 데이터가 없습니다."
         )
 
     else:
+
         quarter_chart_df = (
             quarter_year_df
             .copy()
             .set_index("연도")
         )
 
+        # 연도는 범주형으로 표시
         quarter_chart_df.index = (
             quarter_chart_df.index
             .astype(int)
