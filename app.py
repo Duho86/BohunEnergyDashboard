@@ -870,7 +870,7 @@ def render_dashboard_tab(
                         title=None,
                         stack="zero",
                         axis=alt.Axis(
-                            format=","
+                            format=",.0f",
                         ),
                     ),
 
@@ -993,7 +993,7 @@ def render_dashboard_tab(
                         title=None,
                         stack="zero",
                         axis=alt.Axis(
-                            format=","
+                            format=",.0f",
                         ),
                     ),
 
