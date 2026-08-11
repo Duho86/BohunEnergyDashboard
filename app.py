@@ -805,6 +805,7 @@ def render_dashboard_tab(
 
     # -----------------------------------------------------------
     # 반기별 에너지 사용량 추이
+    # 아래 → 위 : 상반기 → 하반기
     # -----------------------------------------------------------
     with col_g3:
         st.markdown(
@@ -815,31 +816,116 @@ def render_dashboard_tab(
             st.info(
                 "반기별 에너지 사용량을 계산할 데이터가 없습니다."
             )
-        else:
-            half_chart_df = (
-                half_year_df
-                .copy()
-                .set_index("연도")
+
+        elif not ALT_AVAILABLE:
+            st.info(
+                "반기별 차트를 표시하려면 altair 패키지가 필요합니다."
             )
 
-            half_chart_df.index = (
-                half_chart_df.index
+        else:
+            half_chart_data = half_year_df.melt(
+                id_vars=["연도"],
+                value_vars=[
+                    "상반기",
+                    "하반기",
+                ],
+                var_name="반기",
+                value_name="에너지 사용량",
+            )
+
+            # 누적 순서 강제 지정
+            # 1 = 가장 아래
+            # 2 = 그 위
+            half_order_map = {
+                "상반기": 1,
+                "하반기": 2,
+            }
+
+            half_chart_data["누적순서"] = (
+                half_chart_data["반기"]
+                .map(half_order_map)
+            )
+
+            half_chart_data["연도"] = (
+                half_chart_data["연도"]
                 .astype(int)
                 .astype(str)
             )
 
-            st.bar_chart(
-                half_chart_df[
-                    [
-                        "상반기",
-                        "하반기",
-                    ]
-                ],
+            half_chart = (
+                alt.Chart(half_chart_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "연도:N",
+                        title=None,
+                        sort=None,
+                        axis=alt.Axis(
+                            labelAngle=-90
+                        ),
+                    ),
+
+                    y=alt.Y(
+                        "에너지 사용량:Q",
+                        title=None,
+                        stack="zero",
+                        axis=alt.Axis(
+                            format=","
+                        ),
+                    ),
+
+                    color=alt.Color(
+                        "반기:N",
+                        title=None,
+                        scale=alt.Scale(
+                            domain=[
+                                "상반기",
+                                "하반기",
+                            ]
+                        ),
+                        legend=alt.Legend(
+                            orient="bottom",
+                            direction="horizontal",
+                        ),
+                    ),
+
+                    # 핵심:
+                    # 아래에서 위 순서를 명시적으로 고정
+                    order=alt.Order(
+                        "누적순서:Q",
+                        sort="ascending",
+                    ),
+
+                    tooltip=[
+                        alt.Tooltip(
+                            "연도:N",
+                            title="연도",
+                        ),
+                        alt.Tooltip(
+                            "반기:N",
+                            title="구분",
+                        ),
+                        alt.Tooltip(
+                            "에너지 사용량:Q",
+                            title="에너지 사용량",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+                .properties(
+                    height=300
+                )
+            )
+
+            st.altair_chart(
+                half_chart,
                 use_container_width=True,
             )
 
+
     # -----------------------------------------------------------
     # 분기별 에너지 사용량 추이
+    # 아래 → 위 : 1분기 → 2분기 → 3분기 → 4분기
     # -----------------------------------------------------------
     with col_g4:
         st.markdown(
@@ -850,31 +936,117 @@ def render_dashboard_tab(
             st.info(
                 "분기별 에너지 사용량을 계산할 데이터가 없습니다."
             )
-        else:
-            quarter_chart_df = (
-                quarter_year_df
-                .copy()
-                .set_index("연도")
+
+        elif not ALT_AVAILABLE:
+            st.info(
+                "분기별 차트를 표시하려면 altair 패키지가 필요합니다."
             )
 
-            quarter_chart_df.index = (
-                quarter_chart_df.index
+        else:
+            quarter_chart_data = quarter_year_df.melt(
+                id_vars=["연도"],
+                value_vars=[
+                    "1분기",
+                    "2분기",
+                    "3분기",
+                    "4분기",
+                ],
+                var_name="분기",
+                value_name="에너지 사용량",
+            )
+
+            # 누적 순서 강제 지정
+            # 1분기가 맨 아래
+            quarter_order_map = {
+                "1분기": 1,
+                "2분기": 2,
+                "3분기": 3,
+                "4분기": 4,
+            }
+
+            quarter_chart_data["누적순서"] = (
+                quarter_chart_data["분기"]
+                .map(quarter_order_map)
+            )
+
+            quarter_chart_data["연도"] = (
+                quarter_chart_data["연도"]
                 .astype(int)
                 .astype(str)
             )
 
-            st.bar_chart(
-                quarter_chart_df[
-                  [
-                        "4분기",
-                        "3분기",
-                        "2분기",
-                        "1분기",
-                    ]
-                ],
-                use_container_width=True,
+            quarter_chart = (
+                alt.Chart(quarter_chart_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "연도:N",
+                        title=None,
+                        sort=None,
+                        axis=alt.Axis(
+                            labelAngle=-90
+                        ),
+                    ),
+
+                    y=alt.Y(
+                        "에너지 사용량:Q",
+                        title=None,
+                        stack="zero",
+                        axis=alt.Axis(
+                            format=","
+                        ),
+                    ),
+
+                    color=alt.Color(
+                        "분기:N",
+                        title=None,
+                        scale=alt.Scale(
+                            domain=[
+                                "1분기",
+                                "2분기",
+                                "3분기",
+                                "4분기",
+                            ]
+                        ),
+                        legend=alt.Legend(
+                            orient="bottom",
+                            direction="horizontal",
+                        ),
+                    ),
+
+                    # 핵심:
+                    # 1분기 → 2분기 → 3분기 → 4분기
+                    # 순서로 아래부터 쌓음
+                    order=alt.Order(
+                        "누적순서:Q",
+                        sort="ascending",
+                    ),
+
+                    tooltip=[
+                        alt.Tooltip(
+                            "연도:N",
+                            title="연도",
+                        ),
+                        alt.Tooltip(
+                            "분기:N",
+                            title="구분",
+                        ),
+                        alt.Tooltip(
+                            "에너지 사용량:Q",
+                            title="에너지 사용량",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+                .properties(
+                    height=300
+                )
             )
 
+            st.altair_chart(
+                quarter_chart,
+                use_container_width=True,
+            )
     # -------------------------------------------------------
     # 1. 에너지 사용량 분석 (data_2)
     # -------------------------------------------------------
