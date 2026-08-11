@@ -1333,20 +1333,176 @@ def render_dashboard_tab(
     #df3_detail = data3.detail.copy().reindex(org_order)
     #st.dataframe(df3_detail, use_container_width=True)
 
+    # ===========================================================
+    # AI 피드백용 동일기간 데이터 생성
+    #
+    # 당해연도 데이터가 연중 일부 기간만 존재하면
+    # 과거 연도도 동일한 월까지만 잘라서 비교한다.
+    #
+    # 예:
+    # 2026년 1~3월만 존재
+    # → 2023/2024/2025/2026 모두 1~3월 사용량으로 분석
+    # ===========================================================
+
+    ai_year_to_raw: Dict[int, pd.DataFrame] = {}
+
+    ai_period_end_month = 12
+    ai_period_label = "연간"
+
+    current_df_for_period = analysis_year_to_raw.get(selected_year)
+
+    if (
+        current_df_for_period is not None
+        and not current_df_for_period.empty
+    ):
+        # -------------------------------------------------------
+        # 당해연도에서 실제 데이터가 존재하는 마지막 월 탐색
+        # -------------------------------------------------------
+        active_months = []
+
+        for month in range(1, 13):
+            month_col = f"{month}월"
+
+            if month_col not in current_df_for_period.columns:
+                continue
+
+            month_sum = (
+                pd.to_numeric(
+                    current_df_for_period[month_col],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .sum()
+            )
+
+            # 실제 사용량이 있는 월만 인정
+            if month_sum > 0:
+                active_months.append(month)
+
+        if active_months:
+            ai_period_end_month = max(active_months)
+
+    # -----------------------------------------------------------
+    # 기간명 생성
+    # -----------------------------------------------------------
+    if ai_period_end_month == 3:
+        ai_period_label = "1분기"
+
+    elif ai_period_end_month == 6:
+        ai_period_label = "상반기(1~2분기)"
+
+    elif ai_period_end_month == 9:
+        ai_period_label = "1~3분기"
+
+    elif ai_period_end_month == 12:
+        ai_period_label = "연간"
+
+    else:
+        ai_period_label = f"1~{ai_period_end_month}월 누계"
+
+    # -----------------------------------------------------------
+    # 모든 연도를 당해연도와 동일한 기간으로 재구성
+    # -----------------------------------------------------------
+    for year, df_period_source in analysis_year_to_raw.items():
+
+        if (
+            df_period_source is None
+            or df_period_source.empty
+        ):
+            continue
+
+        df_ai = df_period_source.copy()
+
+        valid_month_cols = []
+
+        for month in range(
+            1,
+            ai_period_end_month + 1,
+        ):
+            month_col = f"{month}월"
+
+            if month_col in df_ai.columns:
+                valid_month_cols.append(month_col)
+
+        if not valid_month_cols:
+            continue
+
+        # -------------------------------------------------------
+        # 핵심:
+        # 기존 연단위 값을 버리고
+        # 현재연도와 동일한 기간의 월 사용량 합계로 재계산
+        # -------------------------------------------------------
+        numeric_months = (
+            df_ai[valid_month_cols]
+            .apply(
+                pd.to_numeric,
+                errors="coerce",
+            )
+            .fillna(0)
+        )
+
+        df_ai["연단위"] = numeric_months.sum(
+            axis=1
+        )
+
+        ai_year_to_raw[int(year)] = df_ai
+    
     # ---------------------------------------------------
     # 4. AI 제안 피드백 (자동 생성 텍스트)
     # ---------------------------------------------------
     st.markdown("---")
     st.subheader("AI 제안 피드백")
 
+    # ===========================================================
+    # AI 피드백은 당해연도의 실제 입력기간과
+    # 동일한 기간을 기준으로 다시 분석
+    # ===========================================================
+
+    try:
+        ai_data2 = build_data_2_usage_analysis(
+            ai_year_to_raw,
+            current_year=selected_year,
+        )
+
+        ai_data3 = build_data_3_feedback(
+            ai_year_to_raw,
+            current_year=selected_year,
+        )
+
+    except Exception as e:
+        st.warning(
+            "동일기간 기준 AI 피드백 계산 중 오류가 발생하여 "
+            "기존 분석 데이터를 사용합니다."
+        )
+
+        ai_data2 = data2
+        ai_data3 = data3
+
+    if ai_period_end_month < 12:
+        st.info(
+            f"{selected_year}년 데이터는 "
+            f"**{ai_period_label}**까지 입력되어 있습니다. "
+            f"AI 제안 피드백은 연간 사용량이 아닌 "
+            f"**각 연도의 동일기간({ai_period_label}) 사용량을 기준으로 비교 분석**합니다."
+        )
+    else:
+        st.caption(
+            f"{selected_year}년 전체 연도 데이터를 기준으로 분석합니다."
+        )
+
     # (종합분석)
     st.markdown("#### (종합분석)")
+    
+    ai_data2_overall = ai_data2.overall.copy()
+    ai_data2_by_org = ai_data2.by_org.copy()
+    ai_df3_by_org = ai_data3.by_org.copy()
+
     global_text = generate_global_feedback_text(
         selected_year=selected_year,
-        df3_overall=data3.overall,
-        data2_overall=data2_overall,
-        data2_by_org=data2_by_org,
-        df3_by_org=df3_by_org,
+        df3_overall=ai_data3.overall,
+        data2_overall=ai_data2_overall,
+        data2_by_org=ai_data2_by_org,
+        df3_by_org=ai_df3_by_org,
     )
     st.markdown(global_text)
 
@@ -1354,12 +1510,33 @@ def render_dashboard_tab(
     st.markdown("---")
     st.markdown("#### [소속기구별 맞춤형 피드백]")
 
-    upa_mean = data2_by_org["면적대비 에너지 사용비율"].mean()
-    total_orgs = len(data2_by_org)
+    upa_mean = (
+        ai_data2_by_org[
+            "면적대비 에너지 사용비율"
+        ].mean()
+    )
 
-    for org in data2_by_org.index:
-        row2 = data2_by_org.loc[org]
-        row3 = df3_by_org.loc[org]
+    total_orgs = len(ai_data2_by_org)
+
+    for org in ai_data2_by_org.index:
+
+        if org not in ai_df3_by_org.index:
+            continue
+
+        row2 = ai_data2_by_org.loc[org]
+        row3 = ai_df3_by_org.loc[org]
+
+        inst_text = generate_institution_feedback_text(
+            org_name=org,
+            row2=row2,
+            row3=row3,
+            upa_mean=upa_mean,
+            total_orgs=total_orgs,
+        )
+
+        st.markdown(inst_text)
+        st.markdown("")
+        
         inst_text = generate_institution_feedback_text(
             org_name=org,
             row2=row2,
@@ -1375,8 +1552,8 @@ def render_dashboard_tab(
     st.markdown("#### [에너지 절감을 위한 공단 공통 제안]")
     st.markdown(
         generate_common_recommendations_text(
-            df3_by_org=df3_by_org,
-            data2_by_org=data2_by_org,
+            df3_by_org=ai_df3_by_org,
+            data2_by_org=ai_data2_by_org,
         )
     )
 
