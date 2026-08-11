@@ -150,6 +150,32 @@ AREA_COL_CANDIDATES = ["연면적/설비용량", "연면적", "연면적(㎡)"]
 ANNUAL_USAGE_COL_CANDIDATES = ["연단위", "연간사용량", "연간 사용량"]
 # 시설구분은 이름이 거의 고정
 FACILITY_TYPE_COL = "시설구분"
+# 업로드 원본의 연료/에너지원 구분 컬럼 후보
+ENERGY_TYPE_COL_CANDIDATES = [
+    "연료구분", "연료 구분", "연료종류", "연료 종류",
+    "에너지종류", "에너지 종류", "에너지원",
+    "에너지원구분", "에너지원 구분",
+]
+
+
+def _normalize_energy_type(value: object) -> str:
+    """원본의 다양한 연료 표기를 대시보드 표준 에너지 종류로 정규화한다."""
+    if pd.isna(value):
+        return "기타"
+
+    raw = str(value).strip()
+    compact = re.sub(r"[\s_\-/()]", "", raw).lower()
+
+    if any(k in compact for k in ("전기", "electric", "electricity")):
+        return "전기"
+    if any(k in compact for k in ("lng", "도시가스", "천연가스", "가스")):
+        return "가스(LNG)"
+    if any(k in compact for k in ("등유", "kerosene")):
+        return "등유"
+    if any(k in compact for k in ("지역난방", "districtheating", "열사용", "열에너지")):
+        return "지역난방"
+
+    return raw if raw else "기타"
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -228,6 +254,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
       - 연도, year
       - 기관명, org_name
       - 시설구분(의료/복지/기타)
+      - 에너지종류(전기/가스(LNG)/등유/지역난방 등)
       - 연면적
       - 연단위(연간 사용량)
       - 1월~12월: 월별 에너지 사용량 (엑셀 헤더명을 그대로 사용)
@@ -250,6 +277,21 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             f"필수 컬럼 '{FACILITY_TYPE_COL}'(시설구분)을 찾을 수 없습니다."
         )
 
+    # 원본에 명시된 연료/에너지원 구분을 보존한다.
+    # 기존 버전은 이 정보를 df_raw에서 누락해 사이드바 에너지 종류 필터를 적용할 수 없었다.
+    energy_type_col = next(
+        (c for c in ENERGY_TYPE_COL_CANDIDATES if c in df.columns),
+        None,
+    )
+    if energy_type_col is None:
+        energy_type = pd.Series("기타", index=df.index, dtype="object")
+        _log_warning(
+            f"{year}년 파일에서 연료/에너지 종류 컬럼을 찾지 못했습니다. "
+            f"후보 컬럼: {ENERGY_TYPE_COL_CANDIDATES}. 해당 행은 '기타'로 처리합니다."
+        )
+    else:
+        energy_type = df[energy_type_col].map(_normalize_energy_type)
+
     # -------------------------------------------------------
     # 2) 집계 행 제거: '합계', '합 계', '소계', '소 계' 모두 제거
     # -------------------------------------------------------
@@ -264,8 +306,12 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     if drop_mask.any():
         df = df.loc[~drop_mask].copy()
 
-    # 집계행 제거 후 기관명 다시 재계산
+    # 집계행 제거 후 기관명/에너지 종류 다시 재계산
     org_series = df[org_col].astype(str).str.strip()
+    if energy_type_col is None:
+        energy_type = pd.Series("기타", index=df.index, dtype="object")
+    else:
+        energy_type = df[energy_type_col].map(_normalize_energy_type)
 
     # -------------------------------------------------------
     # 3) 1월~12월 월별 사용량 컬럼 탐지 및 숫자화
@@ -338,6 +384,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
         "기관명": org_series,
         "org_name": org_series,
         "시설구분": facility_group,
+        "에너지종류": energy_type,
         "연면적": area,
         "연단위": annual_usage,
     }
