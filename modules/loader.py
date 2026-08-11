@@ -152,30 +152,56 @@ ANNUAL_USAGE_COL_CANDIDATES = ["연단위", "연간사용량", "연간 사용량
 FACILITY_TYPE_COL = "시설구분"
 # 업로드 원본의 연료/에너지원 구분 컬럼 후보
 ENERGY_TYPE_COL_CANDIDATES = [
-    "연료구분", "연료 구분", "연료종류", "연료 종류",
-    "에너지종류", "에너지 종류", "에너지원",
-    "에너지원구분", "에너지원 구분",
+    "연료",         
+    "연료구분",
+    "연료 구분",
+    "연료종류",
+    "연료 종류",
+    "에너지종류",
+    "에너지 종류",
+    "에너지원",
+    "에너지원구분",
+    "에너지원 구분",
 ]
 
 
 def _normalize_energy_type(value: object) -> str:
-    """원본의 다양한 연료 표기를 대시보드 표준 에너지 종류로 정규화한다."""
+    """원본의 다양한 연료 표기를 대시보드 표준 에너지 종류로 정규화."""
     if pd.isna(value):
         return "기타"
 
     raw = str(value).strip()
     compact = re.sub(r"[\s_\-/()]", "", raw).lower()
 
-    if any(k in compact for k in ("전기", "electric", "electricity")):
+    if raw in ("", "nan"):
+        return "기타"
+
+    if "전기" in compact or compact in ("electric", "electricity"):
         return "전기"
-    if any(k in compact for k in ("lng", "도시가스", "천연가스", "가스")):
+
+    # LPG를 LNG보다 먼저 검사
+    if "lpg" in compact or "액화석유가스" in compact:
+        return "가스(LPG)"
+
+    if (
+        "lng" in compact
+        or "도시가스" in compact
+        or "천연가스" in compact
+    ):
         return "가스(LNG)"
-    if any(k in compact for k in ("등유", "kerosene")):
+
+    if "등유" in compact or "kerosene" in compact:
         return "등유"
-    if any(k in compact for k in ("지역난방", "districtheating", "열사용", "열에너지")):
+
+    if (
+        "지역난방" in compact
+        or "districtheating" in compact
+        or "열사용" in compact
+        or "열에너지" in compact
+    ):
         return "지역난방"
 
-    return raw if raw else "기타"
+    return raw
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
