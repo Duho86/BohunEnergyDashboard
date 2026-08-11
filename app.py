@@ -1400,7 +1400,7 @@ def main() -> None:
             st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
 
         # 업로드 데이터의 연료/에너지원 구분을 실제 필터 옵션으로 사용한다.
-        energy_order = ["전기", "가스(LNG)", "등유", "지역난방"]
+        energy_order = [    "전기",    "가스(LNG)",    "가스(LPG)",    "등유",    "지역난방",]
         if selected_year is not None and df_raw_all is not None and not df_raw_all.empty and "에너지종류" in df_raw_all.columns:
             energy_values = (
                 df_raw_all.loc[df_raw_all["연도"] == selected_year, "에너지종류"]
