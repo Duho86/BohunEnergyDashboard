@@ -2717,7 +2717,7 @@ def render_debug_tab(
                     </style>
 
                     <div class="easter-egg-toast">
-                        🫡 이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다
+                        ★짜☆잔★ 프로그램 제작자: 한국보훈복지의료공단 김두호 과장 ★짜☆잔★
                     </div>
                     """,
                     unsafe_allow_html=True,
