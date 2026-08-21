@@ -299,27 +299,22 @@ def render_pie_from_series(
     # 범례 표시
     # -------------------------------------------------------
     if show_rate_in_legend:
-        # 3개년 평균 대비 증감률
-        # 실제 증감률 + 파이 비중 표시
-        df["범례"] = df.apply(
-            lambda row: (
-                f"{row['기관명']} "
-                f"({row['actual_value'] * 100:+.2f}%"
-                f" / 비중 {row['파이비중'] * 100:.2f}%)"
-            ),
-            axis=1,
-        )
+    df["범례"] = df.apply(
+        lambda row: (
+            f"{row['기관명']} "
+            f"({row['actual_value'] * 100:+.2f}%)"
+        ),
+        axis=1,
+    )
 
     else:
-        # 일반 원그래프
-        # 기관명 + 파이 비중 표시
-        df["범례"] = df.apply(
-            lambda row: (
-                f"{row['기관명']} "
-                f"({row['파이비중'] * 100:.2f}%)"
-            ),
-            axis=1,
-        )
+    df["범례"] = df.apply(
+        lambda row: (
+            f"{row['기관명']} "
+            f"({row['파이비중'] * 100:.2f}%)"
+        ),
+        axis=1,
+    )
 
     # -------------------------------------------------------
     # 툴팁
@@ -382,10 +377,12 @@ def render_pie_from_series(
                 ),
                 title="기관명",
                 legend=alt.Legend(
-                    labelLimit=0,       # 범례 텍스트 잘림 해제
-                    symbolLimit=100,    # 기관 수가 많아도 범례 표시
+                    labelLimit=350,
+                    symbolLimit=100,
                     orient="right",
                     direction="vertical",
+                    labelFontSize=12,
+                    titleFontSize=13,
                 ),
             ),
 
