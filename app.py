@@ -2639,7 +2639,33 @@ def render_debug_tab(
     year_to_raw: Mapping[int, pd.DataFrame],
     df_raw_all: pd.DataFrame,
 ) -> None:
-    st.subheader("df_raw 메타 정보")
+
+    # =======================================================
+    # Easter Egg
+    # 'df_raw 메타 정보' 옆의 작은 점을 5회 클릭하면 표시
+    # =======================================================
+    col_title, col_secret = st.columns([20, 1])
+
+    with col_title:
+        st.subheader("df_raw 메타 정보")
+
+    with col_secret:
+        if "easter_egg_count" not in st.session_state:
+            st.session_state["easter_egg_count"] = 0
+
+        if st.button(
+            "·",
+            key="easter_egg_trigger",
+            help=None,
+        ):
+            st.session_state["easter_egg_count"] += 1
+
+    if st.session_state["easter_egg_count"] >= 5:
+        st.caption(
+            "이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다"
+        )
+
+    years_available = sorted(year_to_raw.keys())
 
     years_available = sorted(year_to_raw.keys())
     st.write("로딩된 연도:", years_available)
