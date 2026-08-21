@@ -186,69 +186,155 @@ def format_table(
 # ===========================================================
 # 원그래프(파이 차트) 유틸
 # ===========================================================
-def render_pie_from_series(series: pd.Series, title: str, use_abs: bool = False) -> None:
-    """기관별 값을 받아 원그래프(Altair)를 그린다.
-
-    - use_abs=True: 음수 가능 지표(증감률 등)에 절대값 적용
-    - 색상 팔레트: category20
-    - 기관명 정렬: value 내림차순(높은 값 → 낮은 값)
-    - 기타 그룹 없음: 모든 소속기구를 그대로 표시
+def render_pie_from_series(
+    series: pd.Series,
+    title: str,
+    use_abs: bool = False,
+    show_rate_in_legend: bool = False,
+) -> None:
     """
+    기관별 값을 받아 원그래프(Altair)를 그린다.
+
+    - use_abs=True:
+        음수 가능 지표의 파이 크기는 절대값 기준으로 계산
+    - show_rate_in_legend=True:
+        범례에 실제 증감률을 함께 표시
+        예) 광주보훈요양원 (+12.34%)
+    - 기타 그룹 없음
+    - 모든 소속기구 표시
+    """
+
     if not ALT_AVAILABLE:
-        st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
+        st.info(
+            f"'{title}' 원그래프를 표시하려면 "
+            "altair 패키지가 필요합니다."
+        )
         return
 
     if series is None or series.empty:
-        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
+        st.info(
+            f"{title}를(을) 표시할 데이터가 없습니다."
+        )
         return
 
-    # NaN 제거
-    s = series.dropna()
-    if s.empty:
-        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
+    # -------------------------------------------------------
+    # 원본 실제값 보존
+    # -------------------------------------------------------
+    original = pd.to_numeric(
+        series,
+        errors="coerce",
+    ).dropna()
+
+    if original.empty:
+        st.info(
+            f"{title}를(을) 표시할 데이터가 없습니다."
+        )
         return
 
-    # 증감률 등 음수 가능 지표는 절대값으로 비교
+    # -------------------------------------------------------
+    # 파이차트 크기 계산용 값
+    # -------------------------------------------------------
     if use_abs:
-        s = s.abs()
+        chart_value = original.abs()
+    else:
+        chart_value = original.copy()
 
-    # 파이차트는 0/음수 불가 → 0 제거
-    s = s[s > 0]
-    if s.empty:
-        st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
+    # 파이차트는 0 이하 값 사용 불가
+    valid_mask = chart_value > 0
+
+    original = original.loc[valid_mask]
+    chart_value = chart_value.loc[valid_mask]
+
+    if chart_value.empty:
+        st.info(
+            f"{title}를(을) 표시할 유효한 값이 없습니다."
+        )
         return
 
-    # 값 큰 순으로 정렬 (높은 → 낮은)
-    s = s.sort_values(ascending=False)
+    # -------------------------------------------------------
+    # DataFrame 생성
+    # -------------------------------------------------------
+    df = pd.DataFrame(
+        {
+            "기관명": chart_value.index.astype(str),
+            "value": chart_value.values,
+            "actual_value": original.values,
+        }
+    )
 
-    # 🔴 더 이상 상위 10개 + 기타로 묶지 않음 → 전체 소속기구 그대로 사용
-    df = s.reset_index()
-    df.columns = ["기관명", "value"]
+    # 파이 조각 크기 기준 내림차순
+    df = df.sort_values(
+        "value",
+        ascending=False,
+    ).reset_index(drop=True)
 
+    # -------------------------------------------------------
+    # 범례 표시명
+    # -------------------------------------------------------
+    if show_rate_in_legend:
+
+        df["범례"] = df.apply(
+            lambda row: (
+                f"{row['기관명']} "
+                f"({row['actual_value'] * 100:+.2f}%)"
+            ),
+            axis=1,
+        )
+
+        legend_field = "범례"
+
+    else:
+        df["범례"] = df["기관명"]
+        legend_field = "범례"
+
+    # -------------------------------------------------------
+    # Altair 차트
+    # -------------------------------------------------------
     chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
-            theta=alt.Theta(field="value", type="quantitative", stack=True),
-            color=alt.Color(
-                field="기관명",
-                type="nominal",
-                sort=alt.SortField(field="value", order="descending"),
-                scale=alt.Scale(scheme="category20"),
+            theta=alt.Theta(
+                field="value",
+                type="quantitative",
+                stack=True,
             ),
+
+            color=alt.Color(
+                field=legend_field,
+                type="nominal",
+                sort=alt.SortField(
+                    field="value",
+                    order="descending",
+                ),
+                scale=alt.Scale(
+                    scheme="category20"
+                ),
+                title="기관명",
+            ),
+
             tooltip=[
-                alt.Tooltip("기관명:N", title="기관명"),
-                alt.Tooltip("value:Q", title="값", format=",.1f"),
+                alt.Tooltip(
+                    "기관명:N",
+                    title="기관명",
+                ),
+
+                alt.Tooltip(
+                    "actual_value:Q",
+                    title="실제 값",
+                    format=".2%",
+                ),
             ],
         )
-        .properties(title=title)
+        .properties(
+            title=title
+        )
     )
 
-    st.altair_chart(chart, use_container_width=True)
-
-
-
-
+    st.altair_chart(
+        chart,
+        use_container_width=True,
+    )
 
 
 # ===========================================================
@@ -1686,11 +1772,19 @@ def render_dashboard_tab(
                             ]
                         )
 
-                        render_pie_from_series(
-                            series,
-                            title_kor,
-                            use_abs=use_abs,
-                        )
+                        # 3개년 평균 대비 증감률 차트만
+# 범례에 실제 증감률을 함께 표시
+show_rate = (
+    col_name
+    == "3개년 평균 에너지 사용량 대비 증감률"
+)
+
+                render_pie_from_series(
+                    series,
+                    title_kor,
+                    use_abs=use_abs,
+                    show_rate_in_legend=show_rate,
+                )
 
                     else:
                         st.info(
