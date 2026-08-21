@@ -1192,6 +1192,40 @@ def render_dashboard_tab(
         st.exception(e)
         return
 
+        # -------------------------------------------------------
+    # 전년대비 감축률 실제값 보정
+    #
+    # data_2의 실제 전년대비 증감률을 기준으로 계산
+    # 감축률 = -(전년대비 증감률)
+    #
+    # 예)
+    # 증감률 +5% → 감축률 -5%
+    # 증감률 -5% → 감축률 +5%
+    #
+    # NDC 4.17%는 목표 기준값일 뿐,
+    # 실제 전년대비 감축률로 사용하지 않는다.
+    # -------------------------------------------------------
+    if (
+        data3.overall is not None
+        and not data3.overall.empty
+        and data2_overall is not None
+        and not data2_overall.empty
+        and "전년대비 증감률" in data2_overall.columns
+        and "전년대비 감축률" in data3.overall.columns
+    ):
+        actual_yoy_change = pd.to_numeric(
+            pd.Series(
+                [data2_overall.iloc[0]["전년대비 증감률"]]
+            ),
+            errors="coerce",
+        ).iloc[0]
+
+        if not pd.isna(actual_yoy_change):
+            data3.overall.loc[
+                data3.overall.index[0],
+                "전년대비 감축률",
+            ] = -float(actual_yoy_change)
+
     DATA3_OVERALL_FMT = {
         "권장 에너지 사용량": "energy_kwh_int",
         "전년대비 감축률": "percent_2",
