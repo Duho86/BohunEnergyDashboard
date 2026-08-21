@@ -381,6 +381,12 @@ def render_pie_from_series(
                     scheme="category20",
                 ),
                 title="기관명",
+                legend=alt.Legend(
+                    labelLimit=0,       # 범례 텍스트 잘림 해제
+                    symbolLimit=100,    # 기관 수가 많아도 범례 표시
+                    orient="right",
+                    direction="vertical",
+                ),
             ),
 
             tooltip=tooltip_list,
