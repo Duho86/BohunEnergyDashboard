@@ -2642,7 +2642,8 @@ def render_debug_tab(
 
     # =======================================================
     # Easter Egg
-    # 우측의 작은 점을 5회 클릭하면 토스트 메시지 표시
+    # 우측의 작은 점을 5회 클릭하면
+    # 화면 중앙에 약 5초간 메시지 표시
     # =======================================================
     col_title, col_secret = st.columns([30, 1])
 
@@ -2661,76 +2662,83 @@ def render_debug_tab(
             st.session_state["easter_egg_count"] += 1
 
             if st.session_state["easter_egg_count"] >= 5:
+                st.markdown(
+                    """
+                    <style>
+                    @keyframes easterEggFade {
+                        0% {
+                            opacity: 0;
+                            transform: translate(-50%, -50%) scale(0.95);
+                        }
 
-    st.markdown(
-        """
-        <style>
-        @keyframes easterEggFade {
-            0% {
-                opacity: 0;
-                transform: translate(-50%, -50%) scale(0.95);
-            }
-            10% {
-                opacity: 1;
-                transform: translate(-50%, -50%) scale(1);
-            }
-            85% {
-                opacity: 1;
-                transform: translate(-50%, -50%) scale(1);
-            }
-            100% {
-                opacity: 0;
-                transform: translate(-50%, -50%) scale(0.95);
-                visibility: hidden;
-            }
-        }
+                        10% {
+                            opacity: 1;
+                            transform: translate(-50%, -50%) scale(1);
+                        }
 
-        .easter-egg-toast {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+                        85% {
+                            opacity: 1;
+                            transform: translate(-50%, -50%) scale(1);
+                        }
 
-            z-index: 999999;
+                        100% {
+                            opacity: 0;
+                            transform: translate(-50%, -50%) scale(0.95);
+                            visibility: hidden;
+                        }
+                    }
 
-            background: rgba(35, 38, 45, 0.96);
-            color: white;
+                    .easter-egg-toast {
+                        position: fixed;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
 
-            padding: 18px 28px;
-            border-radius: 12px;
+                        z-index: 999999;
 
-            font-size: 16px;
-            font-weight: 600;
-            text-align: center;
+                        background: rgba(35, 38, 45, 0.96);
+                        color: white;
 
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+                        padding: 20px 32px;
+                        border-radius: 12px;
 
-            white-space: nowrap;
+                        font-size: 17px;
+                        font-weight: 600;
+                        text-align: center;
 
-            animation: easterEggFade 5s ease-in-out forwards;
+                        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.40);
 
-            pointer-events: none;
-        }
-        </style>
+                        white-space: nowrap;
 
-        <div class="easter-egg-toast">
-            🫡 이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다
-        </div>
-        """,
-        unsafe_allow_html=True,
+                        animation: easterEggFade 5s ease-in-out forwards;
+
+                        pointer-events: none;
+                    }
+                    </style>
+
+                    <div class="easter-egg-toast">
+                        🫡 이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # 5회 클릭 후 카운터 초기화
+                # 이후 다시 5회 클릭하면 재실행 가능
+                st.session_state["easter_egg_count"] = 0
+
+    # =======================================================
+    # 기존 디버그 / 진단 기능
+    # =======================================================
+    years_available = sorted(year_to_raw.keys())
+
+    st.write(
+        "로딩된 연도:",
+        years_available,
     )
 
-    # 다시 발견할 수 있도록 클릭 횟수 초기화
-    st.session_state["easter_egg_count"] = 0
-
-    years_available = sorted(year_to_raw.keys())
-
-    # ↓ 기존 render_debug_tab 코드 계속
-
-    years_available = sorted(year_to_raw.keys())
-    st.write("로딩된 연도:", years_available)
-
     info_rows = []
+
     for year, df in year_to_raw.items():
         info_rows.append(
             {
@@ -2739,18 +2747,36 @@ def render_debug_tab(
                 "기관 수": df["기관명"].nunique(),
             }
         )
-    st.dataframe(pd.DataFrame(info_rows), use_container_width=True)
+
+    st.dataframe(
+        pd.DataFrame(info_rows),
+        use_container_width=True,
+    )
 
     st.markdown("---")
-    st.subheader("df_raw 전체 데이터 (상위 100행)")
-    st.dataframe(df_raw_all.head(100), use_container_width=True)
+
+    st.subheader(
+        "df_raw 전체 데이터 (상위 100행)"
+    )
+
+    st.dataframe(
+        df_raw_all.head(100),
+        use_container_width=True,
+    )
 
     st.markdown("---")
-    st.subheader("df_raw 컬럼 정보")
+
+    st.subheader(
+        "df_raw 컬럼 정보"
+    )
+
     st.json(
         {
             "columns": df_raw_all.columns.tolist(),
-            "dtypes": {c: str(t) for c, t in df_raw_all.dtypes.items()},
+            "dtypes": {
+                c: str(t)
+                for c, t in df_raw_all.dtypes.items()
+            },
         }
     )
 
