@@ -2642,9 +2642,9 @@ def render_debug_tab(
 
     # =======================================================
     # Easter Egg
-    # 'df_raw 메타 정보' 옆의 작은 점을 5회 클릭하면 표시
+    # 우측의 작은 점을 5회 클릭하면 토스트 메시지 표시
     # =======================================================
-    col_title, col_secret = st.columns([20, 1])
+    col_title, col_secret = st.columns([30, 1])
 
     with col_title:
         st.subheader("df_raw 메타 정보")
@@ -2660,12 +2660,18 @@ def render_debug_tab(
         ):
             st.session_state["easter_egg_count"] += 1
 
-    if st.session_state["easter_egg_count"] >= 5:
-        st.caption(
-            "이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다"
-        )
+            if st.session_state["easter_egg_count"] >= 5:
+                st.toast(
+                    "이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다",
+                    icon="🫡",
+                )
+
+                # 다시 5번 클릭하면 재발견 가능하도록 초기화
+                st.session_state["easter_egg_count"] = 0
 
     years_available = sorted(year_to_raw.keys())
+
+    # ↓ 기존 render_debug_tab 코드 계속
 
     years_available = sorted(year_to_raw.keys())
     st.write("로딩된 연도:", years_available)
