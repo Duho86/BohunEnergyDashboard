@@ -2661,13 +2661,67 @@ def render_debug_tab(
             st.session_state["easter_egg_count"] += 1
 
             if st.session_state["easter_egg_count"] >= 5:
-                st.toast(
-                    "이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다",
-                    icon="🫡",
-                )
 
-                # 다시 5번 클릭하면 재발견 가능하도록 초기화
-                st.session_state["easter_egg_count"] = 0
+    st.markdown(
+        """
+        <style>
+        @keyframes easterEggFade {
+            0% {
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.95);
+            }
+            10% {
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1);
+            }
+            85% {
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1);
+            }
+            100% {
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.95);
+                visibility: hidden;
+            }
+        }
+
+        .easter-egg-toast {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+
+            z-index: 999999;
+
+            background: rgba(35, 38, 45, 0.96);
+            color: white;
+
+            padding: 18px 28px;
+            border-radius: 12px;
+
+            font-size: 16px;
+            font-weight: 600;
+            text-align: center;
+
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+
+            white-space: nowrap;
+
+            animation: easterEggFade 5s ease-in-out forwards;
+
+            pointer-events: none;
+        }
+        </style>
+
+        <div class="easter-egg-toast">
+            🫡 이 프로그램은 한국보훈복지의료공단의 김두호 과장이 만들었다
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 다시 발견할 수 있도록 클릭 횟수 초기화
+    st.session_state["easter_egg_count"] = 0
 
     years_available = sorted(year_to_raw.keys())
 
