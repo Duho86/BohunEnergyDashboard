@@ -196,12 +196,10 @@ def render_pie_from_series(
     기관별 값을 받아 원그래프(Altair)를 그린다.
 
     - use_abs=True:
-        음수 가능 지표의 파이 크기는 절대값 기준으로 계산
+      파이 조각 크기는 절대값 기준
     - show_rate_in_legend=True:
-        범례에 실제 증감률을 함께 표시
-        예) 광주보훈요양원 (+12.34%)
-    - 기타 그룹 없음
-    - 모든 소속기구 표시
+      범례에 실제 증감률 표시
+      예) 광주보훈요양원 (+294.13%)
     """
 
     if not ALT_AVAILABLE:
@@ -217,9 +215,7 @@ def render_pie_from_series(
         )
         return
 
-    # -------------------------------------------------------
-    # 원본 실제값 보존
-    # -------------------------------------------------------
+    # 실제 원본값
     original = pd.to_numeric(
         series,
         errors="coerce",
@@ -231,15 +227,13 @@ def render_pie_from_series(
         )
         return
 
-    # -------------------------------------------------------
     # 파이차트 크기 계산용 값
-    # -------------------------------------------------------
     if use_abs:
         chart_value = original.abs()
     else:
         chart_value = original.copy()
 
-    # 파이차트는 0 이하 값 사용 불가
+    # 파이차트에서 0 이하 값 제거
     valid_mask = chart_value > 0
 
     original = original.loc[valid_mask]
@@ -251,9 +245,7 @@ def render_pie_from_series(
         )
         return
 
-    # -------------------------------------------------------
-    # DataFrame 생성
-    # -------------------------------------------------------
+    # 데이터프레임 생성
     df = pd.DataFrame(
         {
             "기관명": chart_value.index.astype(str),
@@ -262,17 +254,14 @@ def render_pie_from_series(
         }
     )
 
-    # 파이 조각 크기 기준 내림차순
+    # 큰 값부터 정렬
     df = df.sort_values(
         "value",
         ascending=False,
     ).reset_index(drop=True)
 
-    # -------------------------------------------------------
-    # 범례 표시명
-    # -------------------------------------------------------
+    # 증감률 차트인 경우 범례에 실제 증감률 표시
     if show_rate_in_legend:
-
         df["범례"] = df.apply(
             lambda row: (
                 f"{row['기관명']} "
@@ -280,16 +269,23 @@ def render_pie_from_series(
             ),
             axis=1,
         )
-
-        legend_field = "범례"
-
     else:
         df["범례"] = df["기관명"]
-        legend_field = "범례"
 
-    # -------------------------------------------------------
-    # Altair 차트
-    # -------------------------------------------------------
+    # 툴팁 표시 형식
+    if show_rate_in_legend:
+        tooltip_value = alt.Tooltip(
+            "actual_value:Q",
+            title="증감률",
+            format="+.2%",
+        )
+    else:
+        tooltip_value = alt.Tooltip(
+            "actual_value:Q",
+            title="값",
+            format=",.1f",
+        )
+
     chart = (
         alt.Chart(df)
         .mark_arc()
@@ -299,9 +295,8 @@ def render_pie_from_series(
                 type="quantitative",
                 stack=True,
             ),
-
             color=alt.Color(
-                field=legend_field,
+                field="범례",
                 type="nominal",
                 sort=alt.SortField(
                     field="value",
@@ -312,18 +307,12 @@ def render_pie_from_series(
                 ),
                 title="기관명",
             ),
-
             tooltip=[
                 alt.Tooltip(
                     "기관명:N",
                     title="기관명",
                 ),
-
-                alt.Tooltip(
-                    "actual_value:Q",
-                    title="실제 값",
-                    format=".2%",
-                ),
+                tooltip_value,
             ],
         )
         .properties(
@@ -1696,9 +1685,7 @@ def render_dashboard_tab(
     if (
         data2_by_org is None
         or data2_by_org.empty
-        or len(
-            data2_by_org.index
-        ) < 2
+        or len(data2_by_org.index) < 2
     ):
         st.info(
             "소속기구별 비교를 위한 데이터가 2개 미만입니다."
@@ -1738,65 +1725,48 @@ def render_dashboard_tab(
             len(pie_metrics),
             2,
         ):
-            cols = (
-                st.columns(2)
-            )
+            cols = st.columns(2)
 
             for j in range(2):
 
-                if (
-                    i + j
-                    >= len(pie_metrics)
-                ):
+                if i + j >= len(pie_metrics):
                     break
 
                 (
                     title_kor,
                     col_name,
                     use_abs,
-                ) = (
-                    pie_metrics[
-                        i + j
-                    ]
-                )
+                ) = pie_metrics[i + j]
 
                 with cols[j]:
 
-                    if (
-                        col_name
-                        in data2_by_org.columns
-                    ):
-                        series = (
-                            data2_by_org[
-                                col_name
-                            ]
-                        )
+                    if col_name in data2_by_org.columns:
+
+                        series = data2_by_org[
+                            col_name
+                        ]
 
                         # 3개년 평균 대비 증감률 차트만
-# 범례에 실제 증감률을 함께 표시
-show_rate = (
-    col_name
-    == "3개년 평균 에너지 사용량 대비 증감률"
-)
+                        # 범례에 실제 증감률 표시
+                        show_rate = (
+                            col_name
+                            == "3개년 평균 에너지 사용량 대비 증감률"
+                        )
 
-                render_pie_from_series(
-                    series,
-                    title_kor,
-                    use_abs=use_abs,
-                    show_rate_in_legend=show_rate,
-                )
+                        render_pie_from_series(
+                            series,
+                            title_kor,
+                            use_abs=use_abs,
+                            show_rate_in_legend=show_rate,
+                        )
 
                     else:
                         st.info(
-                            f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다."
+                            f"'{col_name}' 컬럼이 없어 "
+                            "원그래프를 표시할 수 없습니다."
                         )
 
     st.markdown("---")
-
-    st.markdown(
-        "**2. 소속기구별 분석**"
-    )
-
     st.dataframe(
         df2_by_org_fmt,
         use_container_width=True,
