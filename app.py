@@ -1570,16 +1570,6 @@ def render_dashboard_tab(
 
         st.markdown(inst_text)
         st.markdown("")
-        
-        inst_text = generate_institution_feedback_text(
-            org_name=org,
-            row2=row2,
-            row3=row3,
-            upa_mean=upa_mean,
-            total_orgs=total_orgs,
-        )
-        st.markdown(inst_text)
-        st.markdown("")
 
     # 공단 공통 제안
     st.markdown("---")
