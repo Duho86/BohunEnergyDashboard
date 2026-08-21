@@ -195,11 +195,18 @@ def render_pie_from_series(
     """
     기관별 값을 받아 원그래프(Altair)를 그린다.
 
-    - use_abs=True:
-      파이 조각 크기는 절대값 기준
-    - show_rate_in_legend=True:
-      범례에 실제 증감률 표시
-      예) 광주보훈요양원 (+294.13%)
+    모든 원그래프:
+      - 범례에 해당 기관의 파이차트 비중(%) 표시
+
+    3개년 평균 대비 증감률:
+      - 파이 크기는 증감률 절대값 기준
+      - 범례에는 실제 +/- 증감률과 파이 비중을 함께 표시
+
+    예)
+      중앙보훈병원 (31.25%)
+
+      증감률 차트:
+      광주보훈요양원 (+294.13% / 비중 76.00%)
     """
 
     if not ALT_AVAILABLE:
@@ -215,7 +222,9 @@ def render_pie_from_series(
         )
         return
 
-    # 실제 원본값
+    # -------------------------------------------------------
+    # 원본 값 숫자 변환
+    # -------------------------------------------------------
     original = pd.to_numeric(
         series,
         errors="coerce",
@@ -227,13 +236,18 @@ def render_pie_from_series(
         )
         return
 
-    # 파이차트 크기 계산용 값
+    # -------------------------------------------------------
+    # 파이차트 조각 크기 계산
+    #
+    # 증감률과 같이 음수가 가능한 값은 절대값 사용
+    # 실제 +/- 값은 original에 그대로 보존
+    # -------------------------------------------------------
     if use_abs:
         chart_value = original.abs()
     else:
         chart_value = original.copy()
 
-    # 파이차트에서 0 이하 값 제거
+    # 파이차트에 사용할 수 없는 0 이하 값 제거
     valid_mask = chart_value > 0
 
     original = original.loc[valid_mask]
@@ -245,7 +259,9 @@ def render_pie_from_series(
         )
         return
 
-    # 데이터프레임 생성
+    # -------------------------------------------------------
+    # DataFrame 생성
+    # -------------------------------------------------------
     df = pd.DataFrame(
         {
             "기관명": chart_value.index.astype(str),
@@ -254,38 +270,96 @@ def render_pie_from_series(
         }
     )
 
-    # 큰 값부터 정렬
-    df = df.sort_values(
-        "value",
-        ascending=False,
-    ).reset_index(drop=True)
+    # -------------------------------------------------------
+    # 파이 비중 계산
+    # -------------------------------------------------------
+    total_value = df["value"].sum()
 
-    # 증감률 차트인 경우 범례에 실제 증감률 표시
+    if total_value > 0:
+        df["파이비중"] = (
+            df["value"]
+            / total_value
+        )
+    else:
+        df["파이비중"] = 0.0
+
+    # -------------------------------------------------------
+    # 큰 비중 순서로 정렬
+    # -------------------------------------------------------
+    df = (
+        df
+        .sort_values(
+            "value",
+            ascending=False,
+        )
+        .reset_index(drop=True)
+    )
+
+    # -------------------------------------------------------
+    # 범례 표시
+    # -------------------------------------------------------
     if show_rate_in_legend:
+        # 3개년 평균 대비 증감률
+        # 실제 증감률 + 파이 비중 표시
         df["범례"] = df.apply(
             lambda row: (
                 f"{row['기관명']} "
-                f"({row['actual_value'] * 100:+.2f}%)"
+                f"({row['actual_value'] * 100:+.2f}%"
+                f" / 비중 {row['파이비중'] * 100:.2f}%)"
             ),
             axis=1,
         )
-    else:
-        df["범례"] = df["기관명"]
 
-    # 툴팁 표시 형식
+    else:
+        # 일반 원그래프
+        # 기관명 + 파이 비중 표시
+        df["범례"] = df.apply(
+            lambda row: (
+                f"{row['기관명']} "
+                f"({row['파이비중'] * 100:.2f}%)"
+            ),
+            axis=1,
+        )
+
+    # -------------------------------------------------------
+    # 툴팁
+    # -------------------------------------------------------
+    tooltip_list = [
+        alt.Tooltip(
+            "기관명:N",
+            title="기관명",
+        ),
+        alt.Tooltip(
+            "파이비중:Q",
+            title="비중",
+            format=".2%",
+        ),
+    ]
+
+    # 증감률 차트는 실제 증감률도 툴팁에 표시
     if show_rate_in_legend:
-        tooltip_value = alt.Tooltip(
-            "actual_value:Q",
-            title="증감률",
-            format="+.2%",
-        )
-    else:
-        tooltip_value = alt.Tooltip(
-            "actual_value:Q",
-            title="값",
-            format=",.1f",
+        tooltip_list.insert(
+            1,
+            alt.Tooltip(
+                "actual_value:Q",
+                title="증감률",
+                format="+.2%",
+            ),
         )
 
+    else:
+        tooltip_list.insert(
+            1,
+            alt.Tooltip(
+                "actual_value:Q",
+                title="값",
+                format=",.2f",
+            ),
+        )
+
+    # -------------------------------------------------------
+    # 파이차트
+    # -------------------------------------------------------
     chart = (
         alt.Chart(df)
         .mark_arc()
@@ -295,6 +369,7 @@ def render_pie_from_series(
                 type="quantitative",
                 stack=True,
             ),
+
             color=alt.Color(
                 field="범례",
                 type="nominal",
@@ -303,20 +378,15 @@ def render_pie_from_series(
                     order="descending",
                 ),
                 scale=alt.Scale(
-                    scheme="category20"
+                    scheme="category20",
                 ),
                 title="기관명",
             ),
-            tooltip=[
-                alt.Tooltip(
-                    "기관명:N",
-                    title="기관명",
-                ),
-                tooltip_value,
-            ],
+
+            tooltip=tooltip_list,
         )
         .properties(
-            title=title
+            title=title,
         )
     )
 
@@ -1746,8 +1816,8 @@ def render_dashboard_tab(
                             col_name
                         ]
 
-                        # 3개년 평균 대비 증감률 차트만
-                        # 범례에 실제 증감률 표시
+                        # 증감률 차트는
+                        # 실제 +/- 증감률도 함께 표시
                         show_rate = (
                             col_name
                             == "3개년 평균 에너지 사용량 대비 증감률"
