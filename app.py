@@ -2784,206 +2784,303 @@ def render_debug_tab(
 # ===========================================================
 # 메인 함수
 # ===========================================================
-def main() -> None:
-    st.set_page_config(
-        page_title="보훈공단 에너지 사용량 관리 대시보드",
-        layout="wide",
+# 소비 / 생산 독립 화면
+import json
+import plotly.express as px
+
+from modules.loader import load_energy_datasets
+from modules.analyzer import (
+    prepare_energy_metrics, period_summary, complete_total,
+    select_period, integrated_electricity, settings_for_year,
+)
+from modules.feedback import build_rule_feedback, generate_energy_feedback
+
+
+@st.cache_data(show_spinner=False)
+def load_dashboard_data(file_items):
+    return load_energy_datasets(file_items)
+
+
+def metric_text(value, suffix=""):
+    return "산정 대기" if value is None or pd.isna(value) else f"{value:,.1f}{suffix}"
+
+
+def render_energy_view(frame, year, end_month, production_view):
+    selected, total, yoy, ranking = period_summary(frame, year, end_month)
+    if selected.empty or selected["수량"].notna().sum() == 0:
+        st.info("선택 조건의 입력 데이터가 없습니다.")
+        return
+
+    carbon_column = "감축추정_tCO2eq" if production_view else "배출량_tCO2eq"
+    carbon = complete_total(selected, carbon_column)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("생산 에너지량" if production_view else "소비 에너지량", metric_text(total, " kWh"))
+    k2.metric("전년 동일 기간 대비", metric_text(yoy, "%"))
+    k3.metric("회피배출 추정량" if production_view else "배출량", metric_text(carbon, " tCO₂eq"))
+    st.caption(
+        f"{year}년 1~{end_month}월. 에너지량은 입력된 월별 수량의 환산 합계입니다. "
+        "전기·열을 에너지량으로 합산하며, 미설정 환산계수가 있으면 산정 대기로 표시합니다."
     )
-
-    st.title("보훈공단 에너지 사용량 관리 대시보드")
-
-    # -------------------------------------------------------
-    # 0. spec 로딩
-    # -------------------------------------------------------
-    try:
-        spec = load_spec()
-    except Exception as e:
-        log_error(f"사양 파일 로딩 중 오류가 발생했습니다: {e}")
-        st.stop()
-
-    fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
-
-        # -------------------------------------------------------
-    # 1. 에너지 사용량 파일 로딩 (캐시 + 실제 파일 동기화)
-    # -------------------------------------------------------
-    year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
-        "year_to_raw_cache", {}
-    )
-    df_raw_all: Optional[pd.DataFrame] = st.session_state.get("df_raw_all_cache")
-
-    # 현재 인식된 파일 목록
-    year_to_file = get_year_to_file()
-
-    # 🔹 파일은 있는데 캐시가 없거나, 구버전 캐시(에너지종류 컬럼 없음)이면 강제 재로딩
-    cache_needs_reload = (
-        not year_to_raw
-        or df_raw_all is None
-        or df_raw_all.empty
-        or "에너지종류" not in df_raw_all.columns
-    )
-    if year_to_file and cache_needs_reload:
-        try:
-            year_to_raw, df_raw_all = load_energy_files(year_to_file)
-            st.session_state["year_to_raw_cache"] = year_to_raw
-            st.session_state["df_raw_all_cache"] = df_raw_all
-        except Exception as e:
-            st.warning(
-                "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
-                "업로드 탭에서 파일 목록과 형식을 다시 확인해 주세요."
-            )
-            st.exception(e)
-            year_to_raw = {}
-            df_raw_all = None
-    elif not year_to_file:
-        # 파일 자체가 없으면 캐시도 비움
-        year_to_raw = {}
-        df_raw_all = None
-
-    # -------------------------------------------------------
-    # 1-1. 현재 분석 가능한 연도 목록 계산
-    # -------------------------------------------------------
-    if year_to_raw:
-        years_available = sorted(year_to_raw.keys())
-    else:
-        years_available = []
-
-
-
-    # -------------------------------------------------------
-    # 2. 사이드바 필터
-    # -------------------------------------------------------
-    with st.sidebar:
-        st.header("필터")
-
-        view_mode = st.radio("보기 범위", ["공단 전체", "기관별"], index=0)
-
-        if years_available:
-            # 항상 실제 로딩된 데이터 중 가장 최근 이행연도를 기본값으로 사용한다.
-            # master_energy_spec.json의 current_year 값이 오래되어도 최신 업로드 연도가 우선한다.
-            default_year = max(years_available)
-
-            selected_year = st.selectbox(
-                "이행연도 선택",
-                years_available,
-                index=years_available.index(default_year),
-            )
-
-            df_year = (
-                df_raw_all[df_raw_all["연도"] == selected_year]
-                if df_raw_all is not None
-                else pd.DataFrame()
-            )
-            orgs_in_data = (
-                df_year["기관명"].dropna().unique().tolist()
-                if not df_year.empty
-                else []
-            )
-
-            org_order = list(get_org_order())
-            orgs_in_data = sorted(
-                [o for o in org_order if o in orgs_in_data],
-                key=org_order.index,
-            )
-
-            selected_org: Optional[str] = None
-            if view_mode == "기관별":
-                if not orgs_in_data:
-                    log_warning(f"{selected_year}년 데이터에 소속기구가 없습니다.")
-                else:
-                    selected_org = st.selectbox("소속기구 선택", orgs_in_data)
-        else:
-            selected_year = None
-            selected_org = None
-            st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
-
-        # 업로드 데이터의 연료/에너지원 구분을 실제 필터 옵션으로 사용한다.
-        energy_order = [    "전기",    "가스(LNG)",    "가스(LPG)",    "등유",    "지역난방",]
-        if selected_year is not None and df_raw_all is not None and not df_raw_all.empty and "에너지종류" in df_raw_all.columns:
-            energy_values = (
-                df_raw_all.loc[df_raw_all["연도"] == selected_year, "에너지종류"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-            )
-            available_energy_types = [e for e in energy_order if e in set(energy_values)]
-            extras = sorted(
-                e for e in set(energy_values)
-                if e and e not in energy_order and e != "기타"
-            )
-            available_energy_types.extend(extras)
-            if "기타" in set(energy_values):
-                available_energy_types.append("기타")
-        else:
-            available_energy_types = []
-
-        selected_energy = st.selectbox(
-            "에너지 종류",
-            ["전체"] + available_energy_types,
-            index=0,
-            help="업로드 파일의 연료/에너지원 구분에 따라 모든 대시보드 분석을 필터링합니다.",
+    missing = int(selected["수량"].isna().sum())
+    if missing:
+        st.warning(
+            f"선택 기간에 미입력 값 {missing}개가 있습니다. "
+            "표시 합계는 입력분 누계이고, 전년 증감률은 완전한 입력 자료에서만 계산합니다."
         )
 
-    # -------------------------------------------------------
-    # 3. 탭 구성
-    # -------------------------------------------------------
-    tab_dashboard, tab_upload, tab_debug = st.tabs(
-        ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
+    observed = selected[selected["수량"].notna()]
+    for unit, group in observed.groupby("단위"):
+        monthly = (
+            group.groupby(["월", "기관명", "에너지원"])["수량"].sum().reset_index()
+        )
+        monthly["계열"] = monthly["기관명"] + " · " + monthly["에너지원"]
+        figure = px.line(
+            monthly, x="월", y="수량", color="계열", markers=True,
+            title=f"월별 {'생산량' if production_view else '소비량'} · {unit}",
+        )
+        figure.update_xaxes(dtick=1)
+        st.plotly_chart(figure, use_container_width=True)
+
+    rows = []
+    for compare_year in sorted(frame["연도"].unique()):
+        period = select_period(frame, compare_year, end_month)
+        rows.append({
+            "연도": str(compare_year),
+            "에너지_kWh": complete_total(period, "에너지_kWh"),
+            "미입력수": int(period["수량"].isna().sum()),
+        })
+    st.plotly_chart(
+        px.bar(
+            pd.DataFrame(rows), x="연도", y="에너지_kWh", hover_data=["미입력수"],
+            title=f"연도별 동일 기간 추이 · 1~{end_month}월",
+        ), use_container_width=True,
     )
+    st.caption("종료월 12월을 선택하면 연간 추이가 표시됩니다.")
 
-    # 분석에 사용할 year_to_raw
-    # 기관/에너지 종류 필터를 모든 연도에 동일하게 적용하여 월별·연도별·분기/반기 및 분석표가 일관되게 동작하도록 한다.
-    if year_to_raw:
-        filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
-        for year, df in year_to_raw.items():
-            sub = df.copy()
-
-            if view_mode == "기관별" and selected_org is not None:
-                sub = sub[sub["기관명"] == selected_org]
-
-            if selected_energy != "전체":
-                if "에너지종류" in sub.columns:
-                    sub = sub[sub["에너지종류"] == selected_energy]
-                else:
-                    sub = sub.iloc[0:0]
-
-            if not sub.empty:
-                filtered_year_to_raw[year] = sub
-
-        analysis_year_to_raw: Mapping[int, pd.DataFrame] = filtered_year_to_raw
-    else:
-        analysis_year_to_raw = year_to_raw
-
-    # 📊 대시보드 탭
-    with tab_dashboard:
-        if selected_year is None:
-            st.info(
-                "아직 분석 가능한 df_raw 데이터가 없습니다. "
-                "먼저 '📂 에너지 사용량 파일 업로드' 탭에서 연도별 파일을 업로드해 주세요."
-            )
-        else:
-            render_dashboard_tab(
-                spec,
-                fmt_rules,
-                analysis_year_to_raw,
-                selected_year,
-                view_mode,
-                selected_org,
+    # 분기와 반기를 함께 제공하되 선택 종료월 이후를 합산하지 않는다.
+    for period_name, length in [("분기", 3), ("반기", 6)]:
+        periods = observed.assign(기간=(observed["월"] - 1) // length + 1)
+        values = (
+            periods.groupby(["기간", "에너지원", "단위"])["수량"]
+            .sum().reset_index()
+        )
+        for unit, data in values.groupby("단위"):
+            st.plotly_chart(
+                px.bar(
+                    data, x="기간", y="수량", color="에너지원",
+                    title=f"{year}년 {period_name}별 누계 · {unit}",
+                ), use_container_width=True,
             )
 
-    # 📂 업로드 탭
-    with tab_upload:
-        render_upload_tab(spec, fmt_rules, df_raw_all=df_raw_all)
+    if not ranking.empty:
+        st.plotly_chart(
+            px.bar(
+                ranking, x="기관명", y="에너지_kWh", color="에너지원",
+                title="기관별 생산 기여도" if production_view else "기관별 소비량",
+            ), use_container_width=True,
+        )
+        display = ranking if production_view else ranking.drop(
+            columns=["확인용량_kW", "등가운전시간_h"]
+        )
+        st.dataframe(display, use_container_width=True, hide_index=True)
 
-    # 🔧 디버그 탭
-    with tab_debug:
-        if not year_to_raw or df_raw_all is None:
-            st.info("아직 df_raw 데이터가 없습니다.")
-        else:
-            render_debug_tab(year_to_raw, df_raw_all)
+    if production_view:
+        st.caption(
+            "등가운전시간 = 생산 에너지량 ÷ 확인된 정격용량. "
+            "태양광 kW와 지열 kWth를 구분하며, 용량 단위 미확인 설비는 계산하지 않습니다. "
+            "실제 변환효율 분석에는 일사량 또는 투입에너지가 필요합니다."
+        )
+    with st.expander("월별 상세 데이터"):
+        st.dataframe(selected, use_container_width=True, hide_index=True)
 
 
-# ===========================================================
-# 엔트리 포인트
-# ===========================================================
+def _read_energy_settings():
+    try:
+        return (
+            dict(st.secrets.get("energy", {})),
+            st.secrets.get("OPENAI_API_KEY", ""),
+            st.secrets.get("OPENAI_MODEL", "gpt-4o"),
+        )
+    except FileNotFoundError:
+        return {}, "", "gpt-4o"
+
+
+def main():
+    st.set_page_config(page_title="보훈공단 에너지 관리 대시보드", layout="wide")
+    st.title("보훈공단 에너지 관리 대시보드")
+    view = st.radio(
+        "대시보드 선택",
+        ["에너지 소비량 대시보드", "신재생에너지 생산량 대시보드"],
+        horizontal=True, label_visibility="collapsed",
+    )
+    production_view = view == "신재생에너지 생산량 대시보드"
+    settings, api_key, model = _read_energy_settings()
+
+    with st.sidebar:
+        st.header("데이터 및 조회 조건")
+        st.session_state.setdefault("energy_upload_widget_version", 0)
+        if st.button("업로드 초기화 · 기본 파일 사용"):
+            st.session_state.pop("energy_uploaded_files", None)
+            st.session_state["energy_upload_widget_version"] += 1
+            st.rerun()
+        uploads = st.file_uploader(
+            "연도별 에너지 관리 엑셀",
+            type=["xlsx"], accept_multiple_files=True,
+            key=f"energy_upload_{st.session_state['energy_upload_widget_version']}",
+        )
+
+    existing = st.session_state.get("energy_uploaded_files")
+    candidate = (
+        tuple(sorted((item.name, item.getvalue()) for item in uploads))
+        if uploads else existing
+    )
+    if candidate is None:
+        candidate = tuple(
+            (path.name, path.read_bytes()) for path in sorted(DATA_DIR.glob("*.xlsx"))
+        )
+    if not candidate:
+        st.info("연도별 에너지 관리 엑셀을 업로드해 주세요.")
+        return
+    try:
+        consumption, production, issues = load_dashboard_data(candidate)
+        # 검증에 성공한 파일 세트만 세션의 최신 데이터로 반영한다.
+        if uploads:
+            st.session_state["energy_uploaded_files"] = candidate
+        consumption = prepare_energy_metrics(consumption, settings)
+        production = prepare_energy_metrics(production, settings)
+    except Exception as exc:
+        st.error(f"입력 데이터 또는 설정 확인이 필요합니다. {exc}")
+        return
+
+    all_data = pd.concat([consumption, production], ignore_index=True)
+    years = sorted(all_data["연도"].unique())
+    with st.sidebar:
+        year = st.selectbox("이행연도", years, index=len(years) - 1)
+        orgs = sorted(all_data.loc[all_data["연도"].eq(year), "기관명"].unique())
+        organization = st.selectbox("소속기관", ["전체"] + orgs)
+        entered = all_data[
+            all_data["연도"].eq(year)
+            & all_data["수량"].notna() & all_data["수량"].ne(0)
+        ]
+        default_end = int(entered["월"].max()) if not entered.empty else 12
+        end_month = st.selectbox(
+            "누계 종료월", list(range(1, 13)), index=default_end - 1,
+            key=f"period_end_{year}",
+            help="마지막 비영(0이 아닌) 입력월을 기본값으로 사용합니다. 실제 조회기간에 맞게 변경하세요.",
+        )
+    if organization != "전체":
+        consumption = consumption[consumption["기관명"].eq(organization)].copy()
+        production = production[production["기관명"].eq(organization)].copy()
+
+    frame = production if production_view else consumption
+    with st.sidebar:
+        fuels = sorted(frame.loc[frame["연도"].eq(year), "에너지원"].unique())
+        fuel = st.selectbox("에너지원", ["전체"] + fuels, key=f"fuel_{view}")
+        st.caption("업로드 자료는 현재 세션에서 사용합니다. 재접속 기본 자료는 data/에 저장하세요.")
+    selected_frame = frame if fuel == "전체" else frame[frame["에너지원"].eq(fuel)].copy()
+
+    dashboard_tab, diagnostic_tab, data_tab = st.tabs(
+        ["대시보드", "통합 진단 및 실행 가이드", "데이터 점검"]
+    )
+    with dashboard_tab:
+        render_energy_view(selected_frame, year, end_month, production_view)
+        if production_view:
+            st.markdown("**K-RE100 관리**")
+            st.caption(
+                "기관 필터 기준입니다. 생산량과 공식 인정 전력사용량을 구분하며, "
+                "지열 열생산량을 재생전력 인정실적에 더하지 않습니다."
+            )
+            config = settings_for_year(settings, year)
+            key = f"{year}|{end_month}|{organization}"
+            confirmed = config.get("re100_verified_kwh", {}).get(key)
+            denominator = config.get("total_electricity_kwh", {}).get(key)
+            valid = all(
+                isinstance(value, (int, float)) and np.isfinite(value) and value >= 0
+                for value in (confirmed, denominator)
+            )
+            rate = (
+                confirmed / denominator * 100
+                if valid and denominator > 0 and confirmed <= denominator else np.nan
+            )
+            r1, r2 = st.columns(2)
+            r1.metric(
+                "확인된 재생전력 사용량",
+                metric_text(confirmed if valid else None, " kWh"),
+            )
+            r2.metric("확인된 재생전력 사용 비율", metric_text(rate, "%"))
+            if valid and confirmed > denominator:
+                st.warning("인정 사용량이 총 전력사용량보다 큽니다. 기간과 범위를 확인하세요.")
+
+    with diagnostic_tab:
+        st.caption("통합 진단은 선택 기관의 모든 소비·생산 에너지원을 함께 분석합니다.")
+        config = settings_for_year(settings, year)
+        baseline = config.get("baseline_tco2", {}).get(f"{year}|{organization}")
+        try:
+            rule_text = build_rule_feedback(consumption, production, year, end_month, baseline)
+            net = integrated_electricity(consumption, production, year, end_month, settings)
+        except ValueError as exc:
+            st.error(f"진단 설정 확인이 필요합니다. {exc}")
+            return
+        st.markdown("**전력 수급 및 자가소비**")
+        st.dataframe(net, use_container_width=True, hide_index=True)
+        st.caption(
+            "총 전력수요에서 확인된 태양광 자가소비량을 차감합니다. "
+            "구매전력은 이미 자가소비 효과가 반영되므로 다시 차감하지 않습니다. "
+            "지열의 순열 기여도에는 보조동력과 대체 열원 정보가 필요합니다."
+        )
+        st.markdown("**규칙 기반 진단**")
+        st.write(rule_text)
+
+        c_period = select_period(consumption, year, end_month)
+        p_period = select_period(production, year, end_month)
+        def json_number(value):
+            return None if pd.isna(value) else float(value)
+        payload = {
+            "연도": int(year), "종료월": int(end_month), "기관": organization,
+            "소비_kWh": json_number(complete_total(c_period, "에너지_kWh")),
+            "생산_kWh": json_number(complete_total(p_period, "에너지_kWh")),
+            "배출_tCO2eq": json_number(complete_total(c_period, "배출량_tCO2eq")),
+            "회피배출추정_tCO2eq": json_number(complete_total(p_period, "감축추정_tCO2eq")),
+            "연간기준배출량": baseline,
+            "기관별전력수급": json.loads(net.to_json(orient="records", force_ascii=False)),
+            "평가편람": config.get("evaluation_guidance", "미제공"),
+        }
+        request_json = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        request_id = hashlib.sha256(
+            (request_json + rule_text + model).encode("utf-8")
+        ).hexdigest()
+        if st.button("AI 맞춤 실행 가이드 생성"):
+            with st.spinner("실행 가이드를 생성하고 있습니다."):
+                text, source = generate_energy_feedback(
+                    payload, rule_text, api_key=api_key, model=model
+                )
+            st.session_state["energy_ai_result"] = (request_id, text, source)
+        saved = st.session_state.get("energy_ai_result")
+        if saved and saved[0] == request_id:
+            st.caption(saved[2])
+            st.markdown(saved[1])
+
+    with data_tab:
+        for message in issues:
+            st.warning(message)
+        for name, table, carbon_column in [
+            ("소비", consumption, "배출량_tCO2eq"),
+            ("생산", production, "감축추정_tCO2eq"),
+        ]:
+            observed = table[table["수량"].notna()]
+            unavailable = observed[
+                observed["에너지_kWh"].isna() | observed[carbon_column].isna()
+            ][["연도", "에너지원", "단위"]].drop_duplicates()
+            if not unavailable.empty:
+                st.markdown(f"**{name} 환산계수 확인 필요**")
+                st.dataframe(unavailable, use_container_width=True, hide_index=True)
+            st.markdown(f"**{name} 데이터**")
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        st.caption(
+            "같은 기관의 여러 설비는 원본행 번호로 구분합니다. "
+            "행 번호는 연도를 넘어 동일 설비를 보장하는 식별자가 아닙니다."
+        )
+
+
 if __name__ == "__main__":
     main()
