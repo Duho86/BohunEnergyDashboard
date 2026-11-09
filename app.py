@@ -861,7 +861,7 @@ def render_dashboard_tab(
     # ===========================================================
     st.markdown("---")
     st.subheader(f"AI 제안 피드백 ({metric_label})")
-    st.caption(f"⚙️ 구동 엔진: **{ARGON_ENGINE_VERSION}** (환산계수 및 다중 지표 자동 추론 활성화)")
+    st.caption(f"⚙️ 구동 엔진: **{ASTRA/ARGON}** (환산계수 및 다중 지표 자동 추론 활성화)")
 
     if comparison_end_month < 12:
         st.info(
