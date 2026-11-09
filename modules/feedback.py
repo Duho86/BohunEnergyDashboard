@@ -13,7 +13,7 @@ import pandas as pd
 from .loader import get_org_order, ORG_FACILITY_GROUP
 
 # ============================================================
-# ARGON 엔진 버전 및 시스템 프롬프트 (요구사항 7 전면 고도화)
+# AI 엔진 버전 및 시스템 프롬프트 (요구사항 7 전면 고도화)
 # ============================================================
 ARGON_ENGINE_VERSION: str = "ARGON-v4.5 (Adaptive Reasoning & Greenhouse-gas Optimization Network)"
 
@@ -29,7 +29,7 @@ ARGON_SYSTEM_PROMPT: str = """
    - 구매전력(한전 수전량)에서 태양광 자가발전량을 이중 차감하지 않는다.
    - 기상 실측치(일사량·외기온도)나 설비 가동시간이 없는 경우 '기상 보정 완료'로 표현하지 않고 '외기 부하 및 가동시간 대조 점검 필요'로 기술한다.
    - 신재생 회피배출 추정량(0.4781 tCO2eq/MWh 등)은 내부 감축 기여도 지표로 활용하며, 공식 외부 상쇄배출권이나 K-RE100 REC 인증 실적으로 단정하지 않는다.
-4. ARGON 4단계 다차원 판단 구조:
+4. AI 4단계 다차원 판단 구조:
    - [1단계: 총괄 및 NDC(4.17%) 기준선 이행 진단] 권장 사용량(또는 3개년 기준선) 대비 달성비율, 전년 동기 및 3개년 평균 대비 증감률, 온실가스 배출·감축 추정량을 종합 판정한다.
    - [2단계: 기관별 다중위험도(Risk Matrix) 판정] ① 면적대비 에너지원단위 과사용, ② 3개년 평균 대비 급증(탄력성 악화), ③ 권장량 대비 초과율을 교차 검증하여 등급(S/A/B/C)을 부여한다.
    - [3단계: 시설군별(의료/복지/기타) 맞춤 설비 처방] 24시간 병동·수술실 기저부하가 높은 보훈병원과 난방·급탕 비중이 높은 보훈요양원의 특성을 분리하여 구체적인 설비 제어(BEMS, 인버터, 피크제어, 열교환기 세관, 태양광 스트링·인버터 및 지열 히트펌프 점검) 방안을 제시한다.
@@ -85,7 +85,7 @@ def _fmt_tco2(kwh_val: object) -> str:
 
 
 # ============================================================
-# 1) ARGON 종합분석 텍스트 생성 (소비량 / 신재생 생산량 겸용, 기존 인터페이스 유지)
+# 1) AI 종합분석 텍스트 생성 (소비량 / 신재생 생산량 겸용, 기존 인터페이스 유지)
 # ============================================================
 def generate_argon_global_feedback_text(
     selected_year: int,
@@ -97,7 +97,7 @@ def generate_argon_global_feedback_text(
     is_production: bool = False,
 ) -> str:
     """
-    공단 전체 기준 종합분석 텍스트 생성 (ARGON 엔진 고도화 버전).
+    공단 전체 기준 종합분석 텍스트 생성 (AI 엔진 고도화 버전).
     기존 UI 구조(권장 에너지 사용량, 전년대비, 3개년 평균 대비, 관리대상 자동 탐지, 종합판단)를 유지하면서
     분석 깊이와 행정 보고서 활용도를 대폭 강화한다.
     """
@@ -153,7 +153,7 @@ def generate_argon_global_feedback_text(
 
     issue_org_text = issue_org if issue_org else "주요 에너지 다소비 소속기구"
 
-    # ARGON 다차원 추세 판정 로직
+    # AI 다차원 추세 판정 로직
     mode_label = "신재생에너지 생산(발전)량" if is_production else "에너지 소비량"
     ghg_type_label = "온실가스 감축기여 추정량" if is_production else "온실가스 배출 환산추정량"
 
@@ -212,7 +212,7 @@ def generate_argon_global_feedback_text(
     lines.append(f"- **전년 동일기간 대비 증감률**: **{_fmt_signed_pct(year_change)}**")
     lines.append(f"- **최근 3개년 평균 대비 증감률**: **{_fmt_signed_pct(avg3_change)}**\n")
 
-    lines.append("**● ARGON 관리대상 기관 자동 탐지 (다중위험도 지표 기반)**")
+    lines.append("**● AI 관리대상 기관 자동 탐지 (다중위험도 지표 기반)**")
     lines.append(
         "- 3개년 평균 대비 증가율 상위 기관: "
         + (", ".join(inc_list) if inc_list else "해당 없음")
@@ -226,7 +226,7 @@ def generate_argon_global_feedback_text(
         + (", ".join(flagged_orgs) if flagged_orgs else "해당 없음")
     )
     lines.append("")
-    lines.append("**● 종합판단 (ARGON 추론 엔진 진단)**")
+    lines.append("**● 종합판단 (AI 추론 엔진 진단)**")
     lines.append(
         f"공단 전체적으로는 {summary} "
         f"특히 전체 비중과 관리 지표를 종합할 때 **{issue_org_text}**의 에너지 수급 및 설비 가동 패턴에 대한 "
@@ -237,7 +237,7 @@ def generate_argon_global_feedback_text(
 
 
 # ============================================================
-# 2) ARGON 소속기구별 맞춤형 피드백 생성 (소비/생산 동일 인터페이스·순서)
+# 2) AI 소속기구별 맞춤형 피드백 생성 (소비/생산 동일 인터페이스·순서)
 # ============================================================
 def generate_argon_institution_feedback_text(
     org_name: str,
@@ -248,7 +248,7 @@ def generate_argon_institution_feedback_text(
     is_production: bool = False,
 ) -> str:
     """
-    소속기구별 맞춤형 피드백 텍스트 생성 (ARGON 엔진 고도화 버전).
+    소속기구별 맞춤형 피드백 텍스트 생성 (AI 엔진 고도화 버전).
     기존 출력 레이아웃(#### ▶ 기관명 -> 1) 에너지 사용 요약 -> 자동 문구 -> 2) 기관 맞춤형 제안)을
     그대로 유지하면서, 시설군(의료/복지/기타) 특성과 NDC 권장량 편차를 정밀 반영한다.
     """
@@ -384,7 +384,7 @@ def generate_argon_institution_feedback_text(
     lines.append("")
     lines.append("자동 문구:")
     lines.append(
-        f"> **[ARGON 진단]** 최근 3개년 평균 대비 에너지량이 **{trend_word}({_fmt_signed_pct(vs3)})** 추세를 보이고 있으며, "
+        f"> **[AI 진단]** 최근 3개년 평균 대비 에너지량이 **{trend_word}({_fmt_signed_pct(vs3)})** 추세를 보이고 있으며, "
         f"연면적 대비 비율은 {level_word}입니다. (관리대상 판정: **{mgmt_flag}**)"
     )
     lines.append("")
@@ -395,14 +395,14 @@ def generate_argon_institution_feedback_text(
 
 
 # ============================================================
-# 3) ARGON 공단 공통 제안 텍스트 생성 (소비/생산 겸용)
+# 3) AI 공단 공통 제안 텍스트 생성 (소비/생산 겸용)
 # ============================================================
 def generate_argon_common_recommendations_text(
     df3_by_org: pd.DataFrame,
     data2_by_org: pd.DataFrame,
     is_production: bool = False,
 ) -> str:
-    """공단 공통 제안 텍스트 생성 (ARGON 엔진 고도화 버전)."""
+    """공단 공통 제안 텍스트 생성 (고도화 버전)."""
     targets: List[str] = []
     if df3_by_org is not None and "에너지 사용량 관리 대상" in df3_by_org.columns:
         targets = [
@@ -413,7 +413,7 @@ def generate_argon_common_recommendations_text(
     lines: List[str] = []
     if not is_production:
         lines.append(
-            "다음 사항은 **ARGON 엔진**이 도출한 공단 19개 소속기구 공통 에너지 소비 절감 및 온실가스 감축 이행 프로토콜입니다.\n"
+            "다음 사항은 **AI 엔진**이 도출한 공단 19개 소속기구 공통 에너지 소비 절감 및 온실가스 감축 이행 프로토콜입니다.\n"
         )
         lines.append(
             "- **[설비 고효율화 및 노후 교체 로드맵]** 면적대비 에너지 사용비율 상위 기관 및 관리대상('O') 기관을 우선순위로 지정하여, "
@@ -429,7 +429,7 @@ def generate_argon_common_recommendations_text(
         )
     else:
         lines.append(
-            "다음 사항은 **ARGON 엔진**이 도출한 공단 신재생에너지(태양광·지열) 발전 효율 극대화 및 실적 관리 공통 프로토콜입니다.\n"
+            "다음 사항은 **AI 엔진**이 도출한 공단 신재생에너지(태양광·지열) 발전 효율 극대화 및 실적 관리 공통 프로토콜입니다.\n"
         )
         lines.append(
             "- **[태양광 발전설비 예방점검 표준화]** 분기별 모듈 표면 오염도 세척, 스트링별 개방전압·운전전류 불균형 계측, "
@@ -648,7 +648,7 @@ def build_rule_feedback(
     baseline: Optional[float] = None,
 ) -> str:
     """
-    소속기구 표준 순서(ORG_ORDER)를 반영하여 소비/생산 이상징후를 진단하는 ARGON 규칙 기반 피드백.
+    소속기구 표준 순서(ORG_ORDER)를 반영하여 소비/생산 이상징후를 진단하는 AI 규칙 기반 피드백.
     """
     org_order = list(get_org_order())
     org_rank = {org: idx for idx, org in enumerate(org_order)}
@@ -747,8 +747,8 @@ def generate_energy_feedback(
     model: str = "gpt-4o",
 ) -> Tuple[str, str]:
     """
-    ARGON 시스템 프롬프트 기반 LLM 피드백 생성.
-    API 키가 없거나 연결 실패 시에도 에러/NONE 없이 내장 ARGON 규칙 진단 결과를 즉시 반환한다.
+    AI 시스템 프롬프트 기반 LLM 피드백 생성.
+    API 키가 없거나 연결 실패 시에도 에러/NONE 없이 내장 AI 규칙 진단 결과를 즉시 반환한다.
     """
     clean_key = str(api_key).strip() if api_key is not None else ""
     if not clean_key or clean_key.upper() in ("NONE", "NULL", ""):
@@ -772,9 +772,9 @@ def generate_energy_feedback(
         text = response.output_text.strip()
         if not text:
             raise ValueError("빈 AI 응답")
-        return text, f"ARGON AI 진단 · {model}"
+        return text, f"AI 진단 · {model}"
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "Energy AI fallback: %s", type(exc).__name__
         )
-        return rule_text, f"ARGON 규칙 기반 진단 ({ARGON_ENGINE_VERSION})"
+        return rule_text, f"AI 규칙 기반 진단 ({ARGON_ENGINE_VERSION})"
