@@ -439,7 +439,14 @@ def load_energy_files(
             raise
 
         try:
-            df_year = build_df_raw(df_original, year)
+            normalized = _normalize_columns(df_original)
+            fuel_col = next(
+                (c for c in ENERGY_TYPE_COL_CANDIDATES if c in normalized.columns), None
+            )
+            if fuel_col:
+                fuel = normalized[fuel_col].astype("string").str.strip()
+                normalized = normalized.loc[~fuel.isin(["태양광", "지열", "용수"])].copy()
+            df_year = build_df_raw(normalized, year)
         except Exception as e:
             _log_error(f"{year}년 df_raw 생성 중 오류가 발생했습니다: {e}")
             raise
