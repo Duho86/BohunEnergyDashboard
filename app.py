@@ -1,6 +1,6 @@
 # app.py
 
-from __future__ import annotations 
+from __future__ import annotations
 
 import re
 import hashlib
@@ -11,31 +11,28 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-
 # 원그래프(파이 차트)용 - altair 사용, 없으면 graceful degrade
 try:
     import altair as alt
     ALT_AVAILABLE = True
 except ImportError:
     ALT_AVAILABLE = False
-    
+
+
 # -----------------------------------------------------------
 # Streamlit rerun helper (버전별 experimental_rerun / rerun 호환)
 # -----------------------------------------------------------
 def safe_rerun() -> None:
     """Streamlit 버전에 따라 rerun 함수를 안전하게 호출한다."""
     try:
-        import streamlit as _st  # 로컬 별칭
+        import streamlit as _st
     except ImportError:
         return
 
-    # 최신 버전: st.rerun 존재
     if hasattr(_st, "rerun"):
         _st.rerun()
-    # 구 버전 호환: experimental_rerun 만 있는 경우
     elif hasattr(_st, "experimental_rerun"):
         _st.experimental_rerun()
-    # 둘 다 없으면 아무 것도 하지 않음
     else:
         return
 
@@ -48,12 +45,21 @@ try:
         load_spec,
         load_energy_files,
         get_org_order,
+        CONSUMPTION_FUELS_ORDER,
+        RENEWABLE_FUELS_ORDER,
     )
     from modules.analyzer import (
         build_data_2_usage_analysis,
         build_data_3_feedback,
+        get_default_energy_settings,
     )
-except Exception as e:  # 모듈 import 에러는 바로 보여주고 중단
+    from modules.feedback import (
+        generate_argon_global_feedback_text,
+        generate_argon_institution_feedback_text,
+        generate_argon_common_recommendations_text,
+        ARGON_ENGINE_VERSION,
+    )
+except Exception as e:
     st.error("내부 모듈(import) 중 오류가 발생했습니다. app.py / modules 경로를 확인해 주세요.")
     st.exception(e)
     st.stop()
@@ -88,11 +94,7 @@ def infer_year_from_filename(name: str) -> Optional[int]:
 # data/ 폴더 검색 (로컬 자동 인식)
 # ===========================================================
 def discover_local_energy_files() -> Dict[int, Path]:
-    """data/ 폴더에서 연도 정보를 가진 엑셀 파일을 찾아 {연도: Path} 매핑 생성.
-
-    동일 연도에 여러 파일이 있을 경우 **가장 최근에 수정된 파일**을 선택한다.
-    (예: 사용자가 2024년 파일을 다시 업로드하여 교체한 경우 최신 파일 사용)
-    """
+    """data/ 폴더에서 연도 정보를 가진 엑셀 파일을 찾아 {연도: Path} 매핑 생성."""
     mapping: Dict[int, Path] = {}
     if not DATA_DIR.is_dir():
         return mapping
@@ -105,12 +107,10 @@ def discover_local_energy_files() -> Dict[int, Path]:
         candidates.setdefault(y, []).append(p)
 
     for y, paths in candidates.items():
-        # mtime 기준 가장 최신 파일 선택
         latest = max(paths, key=lambda pp: pp.stat().st_mtime)
         mapping[y] = latest
 
     return mapping
-
 
 
 # ===========================================================
@@ -127,19 +127,23 @@ def get_year_to_file() -> Dict[int, object]:
 
 
 # ===========================================================
-# 숫자 포맷팅 (master_energy_spec.formatting_rules 기반)
+# 숫자 포맷팅 (master_energy_spec.formatting_rules 기반 - NONE 방지)
 # ===========================================================
 def format_number(value, rule: Mapping) -> str:
-    """spec.formatting_rules 의 규칙을 적용해 숫자를 문자열로 변환."""
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "-"
+    """spec.formatting_rules 의 규칙을 적용해 숫자를 문자열로 변환 (None/NaN 시 0으로 안전 표시)."""
+    if value is None or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+        v = 0.0
+    else:
+        try:
+            v = float(value)
+            if np.isnan(v) or np.isinf(v):
+                v = 0.0
+        except Exception:
+            s_val = str(value).strip()
+            if s_val.upper() in ("NONE", "NAN", "NULL", "산정대기", "산정 대기", ""):
+                return "0"
+            return s_val
 
-    try:
-        v = float(value)
-    except Exception:
-        return str(value)
-
-    # ×100 옵션
     if rule.get("multiply_by_100", False):
         v *= 100
 
@@ -174,6 +178,7 @@ def format_table(
     for col in df_fmt.columns:
         fmt_name = column_fmt_map.get(col, default_fmt_name)
         if not fmt_name:
+            df_fmt[col] = df_fmt[col].fillna("-").replace({"None": "-", "NONE": "-"})
             continue
         rule = fmt_rules.get(fmt_name)
         if not rule:
@@ -192,76 +197,33 @@ def render_pie_from_series(
     use_abs: bool = False,
     show_rate_in_legend: bool = False,
 ) -> None:
-    """
-    기관별 값을 받아 원그래프(Altair)를 그린다.
-
-    모든 원그래프:
-      - 범례에 해당 기관의 파이차트 비중(%) 표시
-
-    3개년 평균 대비 증감률:
-      - 파이 크기는 증감률 절대값 기준
-      - 범례에는 실제 +/- 증감률과 파이 비중을 함께 표시
-
-    예)
-      중앙보훈병원 (31.25%)
-
-      증감률 차트:
-      광주보훈요양원 (+294.13% / 비중 76.00%)
-    """
-
+    """기관별 값을 받아 원그래프(Altair)를 그린다."""
     if not ALT_AVAILABLE:
-        st.info(
-            f"'{title}' 원그래프를 표시하려면 "
-            "altair 패키지가 필요합니다."
-        )
+        st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
         return
 
     if series is None or series.empty:
-        st.info(
-            f"{title}를(을) 표시할 데이터가 없습니다."
-        )
+        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
 
-    # -------------------------------------------------------
-    # 원본 값 숫자 변환
-    # -------------------------------------------------------
-    original = pd.to_numeric(
-        series,
-        errors="coerce",
-    ).dropna()
-
+    original = pd.to_numeric(series, errors="coerce").dropna()
     if original.empty:
-        st.info(
-            f"{title}를(을) 표시할 데이터가 없습니다."
-        )
+        st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
 
-    # -------------------------------------------------------
-    # 파이차트 조각 크기 계산
-    #
-    # 증감률과 같이 음수가 가능한 값은 절대값 사용
-    # 실제 +/- 값은 original에 그대로 보존
-    # -------------------------------------------------------
     if use_abs:
         chart_value = original.abs()
     else:
         chart_value = original.copy()
 
-    # 파이차트에 사용할 수 없는 0 이하 값 제거
     valid_mask = chart_value > 0
-
     original = original.loc[valid_mask]
     chart_value = chart_value.loc[valid_mask]
 
     if chart_value.empty:
-        st.info(
-            f"{title}를(을) 표시할 유효한 값이 없습니다."
-        )
+        st.info(f"{title}를(을) 표시할 유효한 값이 없습니다.")
         return
 
-    # -------------------------------------------------------
-    # DataFrame 생성
-    # -------------------------------------------------------
     df = pd.DataFrame(
         {
             "기관명": chart_value.index.astype(str),
@@ -270,115 +232,42 @@ def render_pie_from_series(
         }
     )
 
-    # -------------------------------------------------------
-    # 파이 비중 계산
-    # -------------------------------------------------------
     total_value = df["value"].sum()
+    df["파이비중"] = (df["value"] / total_value) if total_value > 0 else 0.0
 
-    if total_value > 0:
-        df["파이비중"] = (
-            df["value"]
-            / total_value
-        )
-    else:
-        df["파이비중"] = 0.0
+    df = df.sort_values("value", ascending=False).reset_index(drop=True)
 
-    # -------------------------------------------------------
-    # 큰 비중 순서로 정렬
-    # -------------------------------------------------------
-    df = (
-        df
-        .sort_values(
-            "value",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-        # -------------------------------------------------------
-    # 범례 표시
-    # -------------------------------------------------------
     if show_rate_in_legend:
-        # 3개년 평균 대비 증감률
-        # 실제 증감률을 +/- 부호와 함께 표시
         df["범례"] = df.apply(
-            lambda row: (
-                f"{row['기관명']} "
-                f"({row['actual_value'] * 100:+.2f}%)"
-            ),
+            lambda row: f"{row['기관명']} ({row['actual_value'] * 100:+.2f}%)",
             axis=1,
         )
-
     else:
-        # 일반 원그래프
-        # 해당 기관의 파이 구성비 표시
         df["범례"] = df.apply(
-            lambda row: (
-                f"{row['기관명']} "
-                f"({row['파이비중'] * 100:.2f}%)"
-            ),
+            lambda row: f"{row['기관명']} ({row['파이비중'] * 100:.2f}%)",
             axis=1,
         )
 
-    # -------------------------------------------------------
-    # 툴팁
-    # -------------------------------------------------------
     tooltip_list = [
-        alt.Tooltip(
-            "기관명:N",
-            title="기관명",
-        ),
-        alt.Tooltip(
-            "파이비중:Q",
-            title="비중",
-            format=".2%",
-        ),
+        alt.Tooltip("기관명:N", title="기관명"),
+        alt.Tooltip("파이비중:Q", title="비중", format=".2%"),
     ]
 
-    # 증감률 차트는 실제 증감률도 툴팁에 표시
     if show_rate_in_legend:
-        tooltip_list.insert(
-            1,
-            alt.Tooltip(
-                "actual_value:Q",
-                title="증감률",
-                format="+.2%",
-            ),
-        )
-
+        tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="증감률", format="+.2%"))
     else:
-        tooltip_list.insert(
-            1,
-            alt.Tooltip(
-                "actual_value:Q",
-                title="값",
-                format=",.2f",
-            ),
-        )
+        tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="값", format=",.2f"))
 
-    # -------------------------------------------------------
-    # 파이차트
-    # -------------------------------------------------------
     chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
-            theta=alt.Theta(
-                field="value",
-                type="quantitative",
-                stack=True,
-            ),
-
+            theta=alt.Theta(field="value", type="quantitative", stack=True),
             color=alt.Color(
                 field="범례",
                 type="nominal",
-                sort=alt.SortField(
-                    field="value",
-                    order="descending",
-                ),
-                scale=alt.Scale(
-                    scheme="category20",
-                ),
+                sort=alt.SortField(field="value", order="descending"),
+                scale=alt.Scale(scheme="category20"),
                 title="기관명",
                 legend=alt.Legend(
                     labelLimit=350,
@@ -389,338 +278,16 @@ def render_pie_from_series(
                     titleFontSize=13,
                 ),
             ),
-
             tooltip=tooltip_list,
         )
-        .properties(
-            title=title,
-        )
+        .properties(title=title)
     )
 
-    st.altair_chart(
-        chart,
-        use_container_width=True,
-    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 # ===========================================================
-# data_1 (업로드 탭용) 테이블 생성
-# ===========================================================
-def build_data1_tables(df_raw_all: pd.DataFrame):
-    """
-    업로드 탭에서 사용하는 3개 표:
-      1) 연도×기관 에너지 사용량(연단위)
-      2) 연도×기관 연면적
-      3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
-    """
-    df = df_raw_all.copy()
-
-    years = sorted(df["연도"].unique())
-    org_order = list(get_org_order())
-
-    # 1) 연도×기관 에너지 사용량 (연단위)
-    usage = (
-        df.pivot_table(
-            index="연도",
-            columns="기관명",
-            values="연단위",
-            aggfunc="sum",
-            fill_value=0,
-        )
-        .reindex(index=years)
-        .reindex(columns=org_order)
-    )
-    usage["합계"] = usage.sum(axis=1)
-
-    # 2) 연도×기관 연면적
-    area = (
-        df.pivot_table(
-            index="연도",
-            columns="기관명",
-            values="연면적",
-            aggfunc="max",
-            fill_value=0,
-        )
-        .reindex(index=years)
-        .reindex(columns=org_order)
-    )
-    area["합계"] = area.sum(axis=1)
-
-    # 3) 연도별 3개년 평균 에너지 사용량 (직전 최대 3개년 평균)
-    avg3 = pd.DataFrame(index=years, columns=usage.columns, dtype=float)
-    for y in years:
-        prev_years = [py for py in years if py < y][-3:]
-        if not prev_years:
-            baseline = usage.loc[y]
-        else:
-            baseline = usage.loc[prev_years].mean()
-        avg3.loc[y] = baseline
-
-    def _reset_index_as_label(df_in: pd.DataFrame) -> pd.DataFrame:
-        out = df_in.copy()
-        out.insert(0, "구분", out.index.astype(str))
-        return out.reset_index(drop=True)
-
-    return (
-        _reset_index_as_label(usage),
-        _reset_index_as_label(area),
-        _reset_index_as_label(avg3),
-    )
-
-
-# ===========================================================
-# 🔎 AI 자동 피드백 생성 유틸
-# ===========================================================
-def _fmt_pct(x: float, digits: int = 2) -> str:
-    if pd.isna(x):
-        return "-"
-    return f"{x * 100:.{digits}f}%"
-
-
-def _fmt_energy(x: float) -> str:
-    if pd.isna(x):
-        return "-"
-    return f"{x:,.0f}"
-
-
-def generate_global_feedback_text(
-    selected_year: int,
-    df3_overall: pd.DataFrame,
-    data2_overall: pd.DataFrame,
-    data2_by_org: pd.DataFrame,
-    df3_by_org: pd.DataFrame,
-) -> str:
-    """공단 전체 기준 종합분석 텍스트 생성"""
-
-    if df3_overall is None or df3_overall.empty:
-        return "데이터가 부족하여 공단 전체 종합분석을 생성할 수 없습니다."
-
-    row_overall_fb = df3_overall.iloc[0]
-    row_overall_usage = data2_overall.iloc[0]
-
-    target = row_overall_fb.get("권장 에너지 사용량", np.nan)
-    year_change = row_overall_usage.get("전년대비 증감률", np.nan)
-    avg3_change = row_overall_usage.get(
-        "3개년 평균 에너지 사용량 대비 증감률", np.nan
-    )
-
-    # 증가율 TOP3 (3개년 평균 대비 증감률)
-    inc_list: list[str] = []
-    if "3개년 평균 에너지 사용량 대비 증감률" in data2_by_org.columns:
-        growth = data2_by_org[
-            "3개년 평균 에너지 사용량 대비 증감률"
-        ].dropna()
-        growth_top = growth.sort_values(ascending=False).head(3)
-        inc_list = [
-            f"{org} ({_fmt_pct(val)})" for org, val in growth_top.items()
-        ]
-
-    # 면적대비 사용량 TOP3
-    area_list: list[str] = []
-    if "면적대비 에너지 사용비율" in data2_by_org.columns:
-        upa = data2_by_org["면적대비 에너지 사용비율"].dropna()
-        upa_top = upa.sort_values(ascending=False).head(3)
-        area_list = [
-            f"{org} ({_fmt_pct(val)})" for org, val in upa_top.items()
-        ]
-
-    # 전체 추세 판단
-    if pd.isna(year_change) or pd.isna(avg3_change):
-        summary = "데이터가 충분하지 않아 추세 판단이 어렵습니다."
-    else:
-        if year_change > 0 and avg3_change > 0:
-            summary = (
-                "전년 및 최근 3개년 평균 대비 에너지 사용량이 모두 증가하는 "
-                "추세입니다."
-            )
-        elif year_change < 0 and avg3_change < 0:
-            summary = (
-                "전년 및 최근 3개년 평균 대비 에너지 사용량이 모두 감소하는 "
-                "추세입니다."
-            )
-        elif year_change > 0 and avg3_change <= 0:
-            summary = (
-                "전년 대비로는 소폭 증가했지만, 최근 3개년 평균 기준으로는 "
-                "안정 또는 감소 추세입니다."
-            )
-        elif year_change < 0 and avg3_change >= 0:
-            summary = (
-                "전년 대비로는 감소했지만, 최근 3개년 평균 기준으로는 "
-                "여전히 높은 수준을 유지하고 있습니다."
-            )
-        else:
-            summary = (
-                "전년 대비와 최근 3개년 평균 대비 추세가 상이하여 "
-                "세부 원인 분석이 필요합니다."
-            )
-
-    # 이슈 기관: 관리대상(O) 중 사용 분포 순위가 높은 기관
-    issue_org = None
-    tmp = df3_by_org.copy()
-    if "에너지 사용량 관리 대상" in tmp.columns:
-        tmp = tmp[tmp["에너지 사용량 관리 대상"] == "O"]
-    if "사용 분포 순위" in tmp.columns and not tmp.empty:
-        tmp = tmp.sort_values("사용 분포 순위")  # 1위가 가장 높은 비중
-        if not tmp.empty:
-            issue_org = tmp.index[0]
-    issue_org_text = issue_org if issue_org else "특정 기관"
-
-    lines: list[str] = []
-    lines.append(
-        f"{selected_year}년 권장 에너지 사용량: "
-        f"**{_fmt_energy(target)} kWh**"
-    )
-    lines.append(f"전년 대비 증감률: **{_fmt_pct(year_change)}**")
-    lines.append(
-        f"최근 3개년 평균 대비 증감률: **{_fmt_pct(avg3_change)}**\n"
-    )
-
-    lines.append("**● 관리대상 기관 자동 탐지**")
-    lines.append(
-        "- 증가율이 높은 기관: "
-        + (", ".join(inc_list) if inc_list else "해당 없음")
-    )
-    lines.append(
-        "- 면적 대비 사용량이 높은 기관: "
-        + (", ".join(area_list) if area_list else "해당 없음")
-    )
-    lines.append("")
-    lines.append("**● 종합판단(자동 문구)**")
-    lines.append(
-        f"공단 전체적으로는 {summary} "
-        f"특히 **{issue_org_text}**의 에너지 사용 수준에 대한 "
-        "면밀한 모니터링이 필요합니다."
-    )
-
-    return "\n".join(lines)
-
-
-def generate_institution_feedback_text(
-    org_name: str,
-    row2: pd.Series,
-    row3: pd.Series,
-    upa_mean: float,
-    total_orgs: int,
-) -> str:
-    """소속기구별 맞춤형 피드백 텍스트 생성"""
-
-    upa = row2.get("면적대비 에너지 사용비율", np.nan)
-    vs3 = row2.get("3개년 평균 에너지 사용량 대비 증감률", np.nan)
-    rank_share = row3.get("사용 분포 순위", np.nan)
-
-    # 증가/감소 추세
-    if pd.isna(vs3) or abs(vs3) < 0.001:
-        trend_word = "유지"
-    elif vs3 > 0:
-        trend_word = "증가"
-    else:
-        trend_word = "감소"
-
-    # 공단 평균 대비 수준
-    if pd.isna(upa) or pd.isna(upa_mean):
-        level_word = "평가 불가"
-    elif upa > upa_mean * 1.05:
-        level_word = "공단 평균 대비 **높은** 수준"
-    elif upa < upa_mean * 0.95:
-        level_word = "공단 평균 대비 **낮은** 수준"
-    else:
-        level_word = "공단 평균과 **유사한** 수준"
-
-    # 비중 순위
-    if pd.isna(rank_share):
-        rank_text = "순위 정보 없음"
-    else:
-        rank_text = f"{int(rank_share)}/{total_orgs}"
-
-    # 조건별 제안 문구
-    suggestions: list[str] = []
-    if not pd.isna(vs3) and vs3 > 0:
-        suggestions.append(
-            "• 증가 요인(증축, 운영시간 증가 등)을 분석하고 "
-            "절감 목표를 재설정할 필요가 있습니다."
-        )
-    if not pd.isna(upa) and not pd.isna(upa_mean) and upa > upa_mean * 1.05:
-        suggestions.append(
-            "• 냉난방 효율, 단열 상태, 운영 기준 등을 점검하여 "
-            "연면적 대비 에너지 효율을 개선해야 합니다."
-        )
-    if not pd.isna(rank_share) and rank_share <= 5:
-        suggestions.append(
-            "• 공단 전체 목표 달성에 미치는 영향이 큰 기관으로, "
-            "피크타임 절감 및 자동제어 강화가 요구됩니다."
-        )
-    if not suggestions:
-        suggestions.append(
-            "• 현재 수준을 유지하면서 에너지 절감 잠재 영역을 "
-            "지속적으로 발굴하는 것이 필요합니다."
-        )
-
-    lines: list[str] = []
-    lines.append(f"#### ▶ {org_name}")
-    lines.append("**1) 에너지 사용 요약**")
-    lines.append(f"- 연면적 대비 사용량: {_fmt_pct(upa)}")
-    lines.append(f"- 3개년 평균 대비 증감률: {_fmt_pct(vs3)}")
-    lines.append(f"- 에너지 사용 비중 순위: {rank_text}")
-    lines.append("")
-    lines.append("자동 문구:")
-    lines.append(
-        "> 최근 3개년 평균 대비 에너지 사용량이 "
-        f"**{trend_word}** 추세를 보이고 있으며, "
-        f"연면적 대비 사용량은 {level_word}입니다."
-    )
-    lines.append("")
-    lines.append("**2) 기관 맞춤형 제안**")
-    lines.extend(suggestions)
-
-    return "\n".join(lines)
-
-
-def generate_common_recommendations_text(
-    df3_by_org: pd.DataFrame,
-    data2_by_org: pd.DataFrame,
-) -> str:
-    """공단 공통 제안 텍스트 생성"""
-
-    targets: list[str] = []
-    if "에너지 사용량 관리 대상" in df3_by_org.columns:
-        targets = list(
-            df3_by_org[df3_by_org["에너지 사용량 관리 대상"] == "O"].index
-        )
-
-    lines: list[str] = []
-    lines.append(
-        "다음 제안은 공단 전체 기관에 공통으로 적용할 수 있는 "
-        "에너지 절감 방향입니다.\n"
-    )
-    lines.append(
-        "- 설비 노후가 의심되는 기관(관리대상 및 면적대비 사용량 상위 기관)을 "
-        "**우선 대상으로** 고효율 설비 교체 로드맵을 수립합니다."
-    )
-    lines.append(
-        "- 보훈병원 및 보훈요양원 등 상시 운영시설에는 "
-        "**BEMS(건물 에너지 관리 시스템)** 적용 및 데이터 기반 모니터링을 확대합니다."
-    )
-    lines.append(
-        "- 전 기관을 대상으로 **대기전력 절감 캠페인, 불필요 조명 소등, "
-        "설정온도 표준화** 등을 정착시킵니다."
-    )
-    if targets:
-        lines.append(
-            f"- 에너지 사용량 관리 대상 기관({', '.join(targets)})은 "
-            "월별 사용량을 집중 모니터링하고, 현장 점검과 절감 컨설팅을 "
-            "우선 지원합니다."
-        )
-    else:
-        lines.append(
-            "- 현재 관리대상으로 분류된 기관은 없으나, 사용량 추세를 주기적으로 "
-            "점검하여 이상징후를 조기에 발견할 필요가 있습니다."
-        )
-
-    return "\n".join(lines)
-
-
-# ===========================================================
-# 📊 대시보드 탭 렌더링 (에너지 사용량 분석 + 피드백)
+# 📊 대시보드 탭 렌더링 (소비량 & 신재생 생산량 동일 구조·인터페이스)
 # ===========================================================
 def render_dashboard_tab(
     spec: dict,
@@ -729,17 +296,24 @@ def render_dashboard_tab(
     selected_year: int,
     view_mode: str,
     selected_org: Optional[str],
+    is_production: bool = False,
 ) -> None:
-
+    """
+    요구사항 4, 6, 7 완벽 반영:
+    에너지 소비량 대시보드와 신재생에너지 생산량 대시보드 모두
+    100% 동일한 인터페이스 배치, 차트(월별/연도별/반기별/분기별/원그래프),
+    분석표(data_2), 피드백 표(data_3), 소속기구 순서(ORG_ORDER),
+    그리고 ARGON 엔진 기반 AI 제안 피드백 인터페이스로 렌더링한다.
+    """
     if not analysis_year_to_raw:
         st.info(
-            "선택된 조건에 해당하는 df_raw 데이터가 없습니다. "
-            "먼저 '📂 에너지 사용량 파일 업로드' 탭에서 파일을 업로드해 주세요."
+            "선택된 조건에 해당하는 데이터가 없습니다. "
+            "좌측 사이드바 필터를 조정하거나 '📂 에너지 사용량 파일 업로드' 탭에서 파일을 확인해 주세요."
         )
         return
 
     # ===========================================================
-    # 0. 에너지 사용량 추이
+    # 0. 에너지 사용량 추이 (소비량·생산량 동일 구조)
     # ===========================================================
     st.subheader("에너지 사용량 추이")
 
@@ -749,19 +323,9 @@ def render_dashboard_tab(
             for df in analysis_year_to_raw.values()
             if df is not None and not df.empty
         ]
-
-        if df_list:
-            df_all = pd.concat(
-                df_list,
-                ignore_index=True,
-            )
-        else:
-            df_all = pd.DataFrame()
-
+        df_all = pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
     except Exception as e:
-        st.warning(
-            "그래프용 df_raw 병합 중 오류가 발생했습니다."
-        )
+        st.warning("그래프용 df_raw 병합 중 오류가 발생했습니다.")
         st.exception(e)
         df_all = pd.DataFrame()
 
@@ -770,130 +334,51 @@ def render_dashboard_tab(
     # ===========================================================
     col_g1, col_g2 = st.columns(2)
 
-    # -----------------------------------------------------------
-    # 월별 에너지 사용량 추이
-    # -----------------------------------------------------------
     with col_g1:
-        st.markdown(
-            "**월별 에너지 사용량 추이**"
-        )
-
-        if (
-            df_all.empty
-            or "연도" not in df_all.columns
-        ):
-            st.info(
-                "월별 그래프를 그릴 df_raw 데이터가 없습니다."
-            )
-
+        st.markdown("**월별 에너지 사용량 추이**")
+        if df_all.empty or "연도" not in df_all.columns:
+            st.info("월별 그래프를 그릴 데이터가 없습니다.")
         else:
-            df_year = df_all[
-                df_all["연도"] == selected_year
-            ].copy()
-
+            df_year = df_all[df_all["연도"] == selected_year].copy()
             month_info = []
-
             for c in df_year.columns:
-                m = re.search(
-                    r"(\d{1,2})\s*월",
-                    str(c),
-                )
-
+                m = re.search(r"(\d{1,2})\s*월", str(c))
                 if m:
-                    month_num = int(
-                        m.group(1)
-                    )
-
+                    month_num = int(m.group(1))
                     if 1 <= month_num <= 12:
-                        month_info.append(
-                            (
-                                month_num,
-                                c,
-                            )
-                        )
+                        month_info.append((month_num, c))
 
             if not month_info:
-                st.info(
-                    "1월~12월 관련 컬럼을 찾지 못해 "
-                    "월별 에너지 사용량 그래프를 표시할 수 없습니다."
-                )
-
+                st.info("1월~12월 관련 컬럼을 찾지 못해 월별 그래프를 표시할 수 없습니다.")
             else:
-                month_info.sort(
-                    key=lambda x: x[0]
-                )
-
-                month_nums = [
-                    m
-                    for m, _ in month_info
-                ]
-
-                month_cols = [
-                    c
-                    for _, c in month_info
-                ]
+                month_info.sort(key=lambda x: x[0])
+                month_nums = [m for m, _ in month_info]
+                month_cols = [c for _, c in month_info]
 
                 for c in month_cols:
-                    df_year[c] = pd.to_numeric(
-                        df_year[c],
-                        errors="coerce",
-                    )
+                    df_year[c] = pd.to_numeric(df_year[c], errors="coerce").fillna(0.0)
 
-                monthly = (
-                    df_year[month_cols]
-                    .sum(axis=0)
-                )
-
+                monthly = df_year[month_cols].sum(axis=0)
                 monthly.index = month_nums
+                st.line_chart(monthly)
 
-                st.line_chart(
-                    monthly
-                )
-
-    # -----------------------------------------------------------
-    # 연도별 에너지 사용량 추이
-    # -----------------------------------------------------------
     with col_g2:
-        st.markdown(
-            "**연도별 에너지 사용량 추이 (최대 5개년)**"
-        )
-
-        if (
-            df_all.empty
-            or "연도" not in df_all.columns
-        ):
-            st.info(
-                "연도별 그래프를 그릴 df_raw 데이터가 없습니다."
-            )
-
+        st.markdown("**연도별 에너지 사용량 추이 (최대 5개년)**")
+        if df_all.empty or "연도" not in df_all.columns:
+            st.info("연도별 그래프를 그릴 데이터가 없습니다.")
         elif "연단위" not in df_all.columns:
-            st.info(
-                "연단위 컬럼이 없어 연도별 "
-                "에너지 사용량을 계산할 수 없습니다."
-            )
-
+            st.info("연단위 컬럼이 없어 연도별 에너지 사용량을 계산할 수 없습니다.")
         else:
             yearly = (
-                df_all
-                .groupby(
-                    "연도",
-                    dropna=False,
-                )["연단위"]
+                df_all.groupby("연도", dropna=False)["연단위"]
                 .sum()
                 .sort_index()
                 .tail(5)
             )
-
             if yearly.empty:
-                st.info(
-                    "연도별 에너지 사용량 합계를 "
-                    "계산할 수 없습니다."
-                )
-
+                st.info("연도별 에너지 사용량 합계를 계산할 수 없습니다.")
             else:
-                st.bar_chart(
-                    yearly
-                )
+                st.bar_chart(yearly)
 
     # ===========================================================
     # 반기별 / 분기별 에너지 사용량 추이
@@ -901,1560 +386,510 @@ def render_dashboard_tab(
     half_rows = []
     quarter_rows = []
 
-    for year in sorted(
-        analysis_year_to_raw.keys()
-    ):
-        df_period = (
-            analysis_year_to_raw.get(
-                year
-            )
-        )
-
-        if (
-            df_period is None
-            or df_period.empty
-        ):
+    for year in sorted(analysis_year_to_raw.keys()):
+        df_period = analysis_year_to_raw.get(year)
+        if df_period is None or df_period.empty:
             continue
 
         month_cols = {}
-
-        for month in range(
-            1,
-            13,
-        ):
-            exact_col = (
-                f"{month}월"
-            )
-
-            if (
-                exact_col
-                in df_period.columns
-            ):
-                month_cols[
-                    month
-                ] = exact_col
-
+        for month in range(1, 13):
+            exact_col = f"{month}월"
+            if exact_col in df_period.columns:
+                month_cols[month] = exact_col
                 continue
-
             for col in df_period.columns:
-                col_text = (
-                    str(col)
-                    .strip()
-                )
-
-                match = re.fullmatch(
-                    rf"{month}\s*월.*",
-                    col_text,
-                )
-
-                if match:
-                    month_cols[
-                        month
-                    ] = col
-
+                col_text = str(col).strip()
+                if re.fullmatch(rf"{month}\s*월.*", col_text):
+                    month_cols[month] = col
                     break
 
         if len(month_cols) < 12:
             continue
 
         monthly_totals = {}
-
-        for month in range(
-            1,
-            13,
-        ):
-            month_col = (
-                month_cols[
-                    month
-                ]
+        for month in range(1, 13):
+            month_col = month_cols[month]
+            monthly_totals[month] = float(
+                pd.to_numeric(df_period[month_col], errors="coerce").fillna(0).sum()
             )
 
-            monthly_totals[
-                month
-            ] = float(
-                pd.to_numeric(
-                    df_period[
-                        month_col
-                    ],
-                    errors="coerce",
-                )
-                .fillna(0)
-                .sum()
-            )
+        first_half = sum(monthly_totals[m] for m in range(1, 7))
+        second_half = sum(monthly_totals[m] for m in range(7, 13))
+        half_rows.append({"연도": int(year), "상반기": first_half, "하반기": second_half})
 
-        # 반기
-        first_half = sum(
-            monthly_totals[m]
-            for m in range(
-                1,
-                7,
-            )
-        )
+        q1 = sum(monthly_totals[m] for m in range(1, 4))
+        q2 = sum(monthly_totals[m] for m in range(4, 7))
+        q3 = sum(monthly_totals[m] for m in range(7, 10))
+        q4 = sum(monthly_totals[m] for m in range(10, 13))
+        quarter_rows.append({"연도": int(year), "1분기": q1, "2분기": q2, "3분기": q3, "4분기": q4})
 
-        second_half = sum(
-            monthly_totals[m]
-            for m in range(
-                7,
-                13,
-            )
-        )
+    half_year_df = pd.DataFrame(half_rows, columns=["연도", "상반기", "하반기"])
+    quarter_year_df = pd.DataFrame(quarter_rows, columns=["연도", "1분기", "2분기", "3분기", "4분기"])
 
-        half_rows.append(
-            {
-                "연도": int(year),
-                "상반기": first_half,
-                "하반기": second_half,
-            }
-        )
+    col_g3, col_g4 = st.columns(2)
 
-        # 분기
-        q1 = sum(
-            monthly_totals[m]
-            for m in range(
-                1,
-                4,
-            )
-        )
-
-        q2 = sum(
-            monthly_totals[m]
-            for m in range(
-                4,
-                7,
-            )
-        )
-
-        q3 = sum(
-            monthly_totals[m]
-            for m in range(
-                7,
-                10,
-            )
-        )
-
-        q4 = sum(
-            monthly_totals[m]
-            for m in range(
-                10,
-                13,
-            )
-        )
-
-        quarter_rows.append(
-            {
-                "연도": int(year),
-                "1분기": q1,
-                "2분기": q2,
-                "3분기": q3,
-                "4분기": q4,
-            }
-        )
-
-    half_year_df = pd.DataFrame(
-        half_rows,
-        columns=[
-            "연도",
-            "상반기",
-            "하반기",
-        ],
-    )
-
-    quarter_year_df = pd.DataFrame(
-        quarter_rows,
-        columns=[
-            "연도",
-            "1분기",
-            "2분기",
-            "3분기",
-            "4분기",
-        ],
-    )
-
-    col_g3, col_g4 = (
-        st.columns(2)
-    )
-
-    # -----------------------------------------------------------
-    # 반기별 차트
-    # 아래 → 위 : 상반기 → 하반기
-    # -----------------------------------------------------------
     with col_g3:
-        st.markdown(
-            "**반기별 에너지 사용량 추이 (연도별 비교)**"
-        )
-
+        st.markdown("**반기별 에너지 사용량 추이 (연도별 비교)**")
         if half_year_df.empty:
-            st.info(
-                "반기별 에너지 사용량을 "
-                "계산할 데이터가 없습니다."
-            )
-
+            st.info("반기별 에너지 사용량을 계산할 데이터가 없습니다.")
         elif not ALT_AVAILABLE:
-            st.info(
-                "반기별 차트를 표시하려면 "
-                "altair 패키지가 필요합니다."
-            )
-
+            st.info("반기별 차트를 표시하려면 altair 패키지가 필요합니다.")
         else:
-            half_chart_data = (
-                half_year_df.melt(
-                    id_vars=[
-                        "연도"
-                    ],
-                    value_vars=[
-                        "상반기",
-                        "하반기",
-                    ],
-                    var_name="반기",
-                    value_name=(
-                        "에너지 사용량"
-                    ),
-                )
+            half_chart_data = half_year_df.melt(
+                id_vars=["연도"],
+                value_vars=["상반기", "하반기"],
+                var_name="반기",
+                value_name="에너지 사용량",
             )
-
-            half_order_map = {
-                "상반기": 1,
-                "하반기": 2,
-            }
-
-            half_chart_data[
-                "누적순서"
-            ] = (
-                half_chart_data[
-                    "반기"
-                ]
-                .map(
-                    half_order_map
-                )
-            )
-
-            half_chart_data[
-                "연도"
-            ] = (
-                half_chart_data[
-                    "연도"
-                ]
-                .astype(int)
-                .astype(str)
-            )
+            half_chart_data["누적순서"] = half_chart_data["반기"].map({"상반기": 1, "하반기": 2})
+            half_chart_data["연도"] = half_chart_data["연도"].astype(int).astype(str)
 
             half_chart = (
-                alt.Chart(
-                    half_chart_data
-                )
+                alt.Chart(half_chart_data)
                 .mark_bar()
                 .encode(
-                    x=alt.X(
-                        "연도:N",
-                        title=None,
-                        sort=None,
-                        axis=alt.Axis(
-                            labelAngle=-90
-                        ),
-                    ),
-
-                    y=alt.Y(
-                        "에너지 사용량:Q",
-                        title=None,
-                        stack="zero",
-                        axis=alt.Axis(
-                            format=",.0f",
-                        ),
-                    ),
-
+                    x=alt.X("연도:N", title=None, sort=None, axis=alt.Axis(labelAngle=-90)),
+                    y=alt.Y("에너지 사용량:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
                     color=alt.Color(
                         "반기:N",
                         title=None,
-                        scale=alt.Scale(
-                            domain=[
-                                "상반기",
-                                "하반기",
-                            ]
-                        ),
-                        legend=alt.Legend(
-                            orient="bottom",
-                            direction=(
-                                "horizontal"
-                            ),
-                        ),
+                        scale=alt.Scale(domain=["상반기", "하반기"]),
+                        legend=alt.Legend(orient="bottom", direction="horizontal"),
                     ),
-
-                    order=alt.Order(
-                        "누적순서:Q",
-                        sort="ascending",
-                    ),
-
+                    order=alt.Order("누적순서:Q", sort="ascending"),
                     tooltip=[
-                        alt.Tooltip(
-                            "연도:N",
-                            title="연도",
-                        ),
-                        alt.Tooltip(
-                            "반기:N",
-                            title="구분",
-                        ),
-                        alt.Tooltip(
-                            "에너지 사용량:Q",
-                            title=(
-                                "에너지 사용량"
-                            ),
-                            format=",.0f",
-                        ),
+                        alt.Tooltip("연도:N", title="연도"),
+                        alt.Tooltip("반기:N", title="구분"),
+                        alt.Tooltip("에너지 사용량:Q", title="에너지 사용량", format=",.0f"),
                     ],
                 )
-                .properties(
-                    height=300
-                )
+                .properties(height=300)
             )
+            st.altair_chart(half_chart, use_container_width=True)
 
-            st.altair_chart(
-                half_chart,
-                use_container_width=True,
-            )
-
-    # -----------------------------------------------------------
-    # 분기별 차트
-    # 아래 → 위 : 1분기 → 2분기 → 3분기 → 4분기
-    # -----------------------------------------------------------
     with col_g4:
-        st.markdown(
-            "**분기별 에너지 사용량 추이 (연도별 비교)**"
-        )
-
+        st.markdown("**분기별 에너지 사용량 추이 (연도별 비교)**")
         if quarter_year_df.empty:
-            st.info(
-                "분기별 에너지 사용량을 "
-                "계산할 데이터가 없습니다."
-            )
-
+            st.info("분기별 에너지 사용량을 계산할 데이터가 없습니다.")
         elif not ALT_AVAILABLE:
-            st.info(
-                "분기별 차트를 표시하려면 "
-                "altair 패키지가 필요합니다."
-            )
-
+            st.info("분기별 차트를 표시하려면 altair 패키지가 필요합니다.")
         else:
-            quarter_chart_data = (
-                quarter_year_df.melt(
-                    id_vars=[
-                        "연도"
-                    ],
-                    value_vars=[
-                        "1분기",
-                        "2분기",
-                        "3분기",
-                        "4분기",
-                    ],
-                    var_name="분기",
-                    value_name=(
-                        "에너지 사용량"
-                    ),
-                )
+            quarter_chart_data = quarter_year_df.melt(
+                id_vars=["연도"],
+                value_vars=["1분기", "2분기", "3분기", "4분기"],
+                var_name="분기",
+                value_name="에너지 사용량",
             )
-
-            quarter_order_map = {
-                "1분기": 1,
-                "2분기": 2,
-                "3분기": 3,
-                "4분기": 4,
-            }
-
-            quarter_chart_data[
-                "누적순서"
-            ] = (
-                quarter_chart_data[
-                    "분기"
-                ]
-                .map(
-                    quarter_order_map
-                )
+            quarter_chart_data["누적순서"] = quarter_chart_data["분기"].map(
+                {"1분기": 1, "2분기": 2, "3분기": 3, "4분기": 4}
             )
-
-            quarter_chart_data[
-                "연도"
-            ] = (
-                quarter_chart_data[
-                    "연도"
-                ]
-                .astype(int)
-                .astype(str)
-            )
+            quarter_chart_data["연도"] = quarter_chart_data["연도"].astype(int).astype(str)
 
             quarter_chart = (
-                alt.Chart(
-                    quarter_chart_data
-                )
+                alt.Chart(quarter_chart_data)
                 .mark_bar()
                 .encode(
-                    x=alt.X(
-                        "연도:N",
-                        title=None,
-                        sort=None,
-                        axis=alt.Axis(
-                            labelAngle=-90
-                        ),
-                    ),
-
-                    y=alt.Y(
-                        "에너지 사용량:Q",
-                        title=None,
-                        stack="zero",
-                        axis=alt.Axis(
-                            format=",.0f",
-                        ),
-                    ),
-
+                    x=alt.X("연도:N", title=None, sort=None, axis=alt.Axis(labelAngle=-90)),
+                    y=alt.Y("에너지 사용량:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
                     color=alt.Color(
                         "분기:N",
                         title=None,
-                        scale=alt.Scale(
-                            domain=[
-                                "1분기",
-                                "2분기",
-                                "3분기",
-                                "4분기",
-                            ]
-                        ),
-                        legend=alt.Legend(
-                            orient="bottom",
-                            direction=(
-                                "horizontal"
-                            ),
-                        ),
+                        scale=alt.Scale(domain=["1분기", "2분기", "3분기", "4분기"]),
+                        legend=alt.Legend(orient="bottom", direction="horizontal"),
                     ),
-
-                    order=alt.Order(
-                        "누적순서:Q",
-                        sort="ascending",
-                    ),
-
+                    order=alt.Order("누적순서:Q", sort="ascending"),
                     tooltip=[
-                        alt.Tooltip(
-                            "연도:N",
-                            title="연도",
-                        ),
-                        alt.Tooltip(
-                            "분기:N",
-                            title="구분",
-                        ),
-                        alt.Tooltip(
-                            "에너지 사용량:Q",
-                            title=(
-                                "에너지 사용량"
-                            ),
-                            format=",.0f",
-                        ),
+                        alt.Tooltip("연도:N", title="연도"),
+                        alt.Tooltip("분기:N", title="구분"),
+                        alt.Tooltip("에너지 사용량:Q", title="에너지 사용량", format=",.0f"),
                     ],
                 )
-                .properties(
-                    height=300
-                )
+                .properties(height=300)
             )
-
-            st.altair_chart(
-                quarter_chart,
-                use_container_width=True,
-            )
+            st.altair_chart(quarter_chart, use_container_width=True)
 
     # ===========================================================
-    # 현재 선택연도의 실제 입력기간 확인
-    #
-    # 예)
-    # 2026년 1~3월 데이터만 존재
-    # → 2023~2026 모두 1~3월 기준으로 비교
-    #
-    # 2025년 1~12월 데이터 존재
-    # → 연간 기준 비교
+    # 현재 선택연도의 실제 입력기간 확인 (동일기간 비교)
     # ===========================================================
-    comparison_year_to_raw: Dict[
-        int,
-        pd.DataFrame,
-    ] = {}
-
+    comparison_year_to_raw: Dict[int, pd.DataFrame] = {}
     comparison_end_month = 12
-    comparison_period_label = (
-        "연간"
-    )
+    comparison_period_label = "연간"
 
-    current_period_df = (
-        analysis_year_to_raw.get(
-            selected_year
-        )
-    )
-
-    if (
-        current_period_df
-        is not None
-        and not current_period_df.empty
-    ):
+    current_period_df = analysis_year_to_raw.get(selected_year)
+    if current_period_df is not None and not current_period_df.empty:
         active_months = []
-
-        for month in range(
-            1,
-            13,
-        ):
-            month_col = (
-                f"{month}월"
-            )
-
-            if (
-                month_col
-                not in current_period_df.columns
-            ):
+        for month in range(1, 13):
+            month_col = f"{month}월"
+            if month_col not in current_period_df.columns:
                 continue
-
-            month_values = (
-                pd.to_numeric(
-                    current_period_df[
-                        month_col
-                    ],
-                    errors="coerce",
-                )
-            )
-
-            month_total = (
-                month_values
-                .fillna(0)
-                .sum()
-            )
-
-            # 미래 미입력월은 0으로 들어오므로
-            # 실제 사용량이 존재하는 마지막 월을 기준으로 판단
-            if month_total > 0:
-                active_months.append(
-                    month
-                )
-
+            month_values = pd.to_numeric(current_period_df[month_col], errors="coerce")
+            if month_values.fillna(0).sum() > 0:
+                active_months.append(month)
         if active_months:
-            comparison_end_month = (
-                max(active_months)
-            )
+            comparison_end_month = max(active_months)
 
-    # -----------------------------------------------------------
-    # 비교기간 이름
-    # -----------------------------------------------------------
     if comparison_end_month == 3:
-        comparison_period_label = (
-            "1분기"
-        )
-
+        comparison_period_label = "1분기"
     elif comparison_end_month == 6:
-        comparison_period_label = (
-            "상반기"
-        )
-
+        comparison_period_label = "상반기"
     elif comparison_end_month == 9:
-        comparison_period_label = (
-            "1~3분기"
-        )
-
+        comparison_period_label = "1~3분기"
     elif comparison_end_month == 12:
-        comparison_period_label = (
-            "연간"
-        )
-
+        comparison_period_label = "연간"
     else:
-        comparison_period_label = (
-            f"1~{comparison_end_month}월 누계"
-        )
+        comparison_period_label = f"1~{comparison_end_month}월 누계"
 
-    # -----------------------------------------------------------
-    # 모든 연도를 선택연도와 동일기간으로 재계산
-    # -----------------------------------------------------------
-    for (
-        year,
-        source_df,
-    ) in analysis_year_to_raw.items():
-
-        if (
-            source_df is None
-            or source_df.empty
-        ):
+    for year, source_df in analysis_year_to_raw.items():
+        if source_df is None or source_df.empty:
             continue
-
-        df_compare = (
-            source_df.copy()
-        )
-
-        period_month_cols = []
-
-        for month in range(
-            1,
-            comparison_end_month + 1,
-        ):
-            month_col = (
-                f"{month}월"
-            )
-
-            if (
-                month_col
-                in df_compare.columns
-            ):
-                period_month_cols.append(
-                    month_col
-                )
-
+        df_compare = source_df.copy()
+        period_month_cols = [
+            f"{m}월" for m in range(1, comparison_end_month + 1) if f"{m}월" in df_compare.columns
+        ]
         if not period_month_cols:
             continue
-
-        period_values = (
-            df_compare[
-                period_month_cols
-            ]
-            .apply(
-                pd.to_numeric,
-                errors="coerce",
-            )
-            .fillna(0)
-        )
-
-        # 핵심:
-        # 연단위 값을 선택연도의 실제 입력기간 누계로 재계산
-        df_compare[
-            "연단위"
-        ] = (
-            period_values
-            .sum(axis=1)
-        )
-
-        comparison_year_to_raw[
-            int(year)
-        ] = df_compare
+        period_values = df_compare[period_month_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        df_compare["연단위"] = period_values.sum(axis=1)
+        comparison_year_to_raw[int(year)] = df_compare
 
     # ===========================================================
-    # 1. 에너지 사용량 분석 (data_2)
-    # 동일기간 기준
+    # 1. 에너지 사용량 분석 (data_2) - 소비/생산 동일 구조
     # ===========================================================
-    st.subheader(
-        "에너지 사용량 분석"
-    )
+    st.subheader("에너지 사용량 분석")
 
     if comparison_end_month < 12:
         st.caption(
-            f"* {selected_year}년 데이터가 "
-            f"{comparison_period_label}까지 입력되어 있어, "
-            f"전년 및 최근 3개년 비교는 "
-            f"각 연도의 동일기간({comparison_period_label}) 기준으로 계산합니다."
+            f"* {selected_year}년 데이터가 {comparison_period_label}까지 입력되어 있어, "
+            f"전년 및 최근 3개년 비교는 각 연도의 동일기간({comparison_period_label}) 기준으로 계산합니다."
         )
 
     try:
-        data2 = (
-            build_data_2_usage_analysis(
-                comparison_year_to_raw,
-                current_year=(
-                    selected_year
-                ),
-            )
+        data2 = build_data_2_usage_analysis(
+            comparison_year_to_raw,
+            current_year=selected_year,
         )
-
     except Exception as e:
-        st.error(
-            "에너지 사용량 분석(data_2) 계산 중 오류가 발생했습니다."
-        )
+        st.error("에너지 사용량 분석(data_2) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
-    data2_overall = (
-        data2.overall.copy()
-    )
+    data2_overall = data2.overall.copy()
+    data2_by_org = data2.by_org.copy()
+    org_order = list(get_org_order())
 
-    data2_by_org = (
-        data2.by_org.copy()
-    )
-
-    org_order = list(
-        get_org_order()
-    )
-
-    # -----------------------------------------------------------
-    # 보기 범위에 따른 기관 정렬
-    # -----------------------------------------------------------
     if view_mode == "공단 전체":
-        data2_by_org = (
-            data2_by_org
-            .reindex(
-                org_order
-            )
-        )
-
-    elif (
-        view_mode == "기관별"
-        and selected_org
-    ):
-        if (
-            selected_org
-            in data2_by_org.index
-        ):
-            data2_by_org = (
-                data2_by_org.loc[
-                    [selected_org]
-                ]
-            )
-
+        data2_by_org = data2_by_org.reindex(org_order)
+    elif view_mode == "기관별" and selected_org:
+        if selected_org in data2_by_org.index:
+            data2_by_org = data2_by_org.loc[[selected_org]]
         else:
-            data2_by_org = (
-                data2_by_org.iloc[
-                    0:0
-                ]
-            )
+            data2_by_org = data2_by_org.iloc[0:0]
 
-    # -----------------------------------------------------------
-    # 포맷 규칙
-    # -----------------------------------------------------------
     DATA2_OVERALL_FMT = {
-        "에너지 사용량(현재 기준)": (
-            "energy_kwh_int"
-        ),
-        "전년대비 증감률": (
-            "percent_2"
-        ),
-        "3개년 평균 에너지 사용량 대비 증감률": (
-            "percent_2"
-        ),
-        "의료시설": (
-            "percent_2"
-        ),
-        "복지시설": (
-            "percent_2"
-        ),
-        "기타시설": (
-            "percent_2"
-        ),
+        "에너지 사용량(현재 기준)": "energy_kwh_int",
+        "전년대비 증감률": "percent_2",
+        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
+        "의료시설": "percent_2",
+        "복지시설": "percent_2",
+        "기타시설": "percent_2",
     }
 
     DATA2_BYORG_FMT = {
-        "연면적": (
-            "area_m2_int"
-        ),
-        "에너지 사용량": (
-            "energy_kwh_int"
-        ),
-        "면적대비 에너지 사용비율": (
-            "percent_2"
-        ),
-        "에너지 사용 비중": (
-            "percent_2"
-        ),
-        "3개년 평균 에너지 사용량 대비 증감률": (
-            "percent_2"
-        ),
-        "시설별 평균 면적 대비 에너지 사용비율": (
-            "percent_2"
-        ),
+        "연면적": "area_m2_int",
+        "에너지 사용량": "energy_kwh_int",
+        "면적대비 에너지 사용비율": "percent_2",
+        "에너지 사용 비중": "percent_2",
+        "3개년 평균 에너지 사용량 대비 증감률": "percent_2",
+        "시설별 평균 면적 대비 에너지 사용비율": "percent_2",
     }
 
-    fac_cols = [
-        "의료시설",
-        "복지시설",
-        "기타시설",
-    ]
+    fac_cols = ["의료시설", "복지시설", "기타시설"]
+    fac_overall = data2_overall[fac_cols].copy()
+    fac_overall_fmt = format_table(
+        fac_overall,
+        fmt_rules,
+        {col: "percent_2" for col in fac_cols},
+    ).T
+    fac_overall_fmt.columns = ["면적대비 에너지 사용비율"]
 
-    fac_overall = (
-        data2_overall[
-            fac_cols
-        ].copy()
-    )
-
-    fac_overall_fmt = (
-        format_table(
-            fac_overall,
-            fmt_rules,
-            {
-                col: "percent_2"
-                for col in fac_cols
-            },
-        )
-    )
-
-    fac_overall_fmt = (
-        fac_overall_fmt.T
-    )
-
-    fac_overall_fmt.columns = [
-        "면적대비 에너지 사용비율"
-    ]
-
-    df2_overall_fmt = (
-        format_table(
-            data2_overall,
-            fmt_rules,
-            DATA2_OVERALL_FMT,
-        )
-    )
-
+    df2_overall_fmt = format_table(data2_overall, fmt_rules, DATA2_OVERALL_FMT)
     for col in fac_cols:
-        if (
-            col
-            in df2_overall_fmt.columns
-        ):
-            df2_overall_fmt = (
-                df2_overall_fmt.drop(
-                    columns=[col]
-                )
-            )
+        if col in df2_overall_fmt.columns:
+            df2_overall_fmt = df2_overall_fmt.drop(columns=[col])
 
-    df2_by_org_fmt = (
-        format_table(
-            data2_by_org,
-            fmt_rules,
-            DATA2_BYORG_FMT,
-        )
-    )
+    df2_by_org_fmt = format_table(data2_by_org, fmt_rules, DATA2_BYORG_FMT)
 
-    col1, col2 = (
-        st.columns(
-            [
-                1.3,
-                1,
-            ]
-        )
-    )
-
+    col1, col2 = st.columns([1.3, 1])
     with col1:
-        suffix = ""
-
-        if (
-            view_mode == "기관별"
-            and selected_org
-        ):
-            suffix = (
-                f" ({selected_org})"
-            )
-
-        st.markdown(
-            f"**1. 공단 전체 기준{suffix}**"
-        )
-
-        st.dataframe(
-            df2_overall_fmt,
-            use_container_width=True,
-        )
+        suffix = f" ({selected_org})" if (view_mode == "기관별" and selected_org) else ""
+        st.markdown(f"**1. 공단 전체 기준{suffix}**")
+        st.dataframe(df2_overall_fmt, use_container_width=True)
 
     with col2:
-        st.markdown(
-            "**시설구분별 면적대비 평균 에너지 사용비율**"
-        )
-
-        if (
-            fac_overall_fmt
-            is not None
-            and not fac_overall_fmt.empty
-        ):
-            st.dataframe(
-                fac_overall_fmt,
-                use_container_width=True,
-            )
-
+        st.markdown("**시설구분별 면적대비 평균 에너지 사용비율**")
+        if fac_overall_fmt is not None and not fac_overall_fmt.empty:
+            st.dataframe(fac_overall_fmt, use_container_width=True)
         else:
-            st.info(
-                "시설구분별 데이터가 없습니다."
-            )
+            st.info("시설구분별 데이터가 없습니다.")
 
     st.markdown("---")
 
     # ===========================================================
     # 1-1. 소속기구별 원그래프
     # ===========================================================
-    st.markdown(
-        "**소속기구별 원그래프 (에너지 분석 부문)**"
-    )
+    st.markdown("**소속기구별 원그래프 (에너지 분석 부문)**")
 
-    if (
-        data2_by_org is None
-        or data2_by_org.empty
-        or len(data2_by_org.index) < 2
-    ):
-        st.info(
-            "소속기구별 비교를 위한 데이터가 2개 미만입니다."
-        )
-
+    if data2_by_org is None or data2_by_org.empty or len(data2_by_org.index) < 2:
+        st.info("소속기구별 비교를 위한 데이터가 2개 미만입니다.")
     else:
         pie_metrics = [
-            (
-                "에너지 사용량",
-                "에너지 사용량",
-                False,
-            ),
-            (
-                "면적대비 에너지 사용비율",
-                "면적대비 에너지 사용비율",
-                False,
-            ),
-            (
-                "에너지 사용 비중",
-                "에너지 사용 비중",
-                False,
-            ),
-            (
-                "3개년 평균 에너지 사용량 대비 증감률",
-                "3개년 평균 에너지 사용량 대비 증감률",
-                True,
-            ),
-            (
-                "시설별 평균 면적 대비 에너지 사용비율",
-                "시설별 평균 면적 대비 에너지 사용비율",
-                False,
-            ),
+            ("에너지 사용량", "에너지 사용량", False),
+            ("면적대비 에너지 사용비율", "면적대비 에너지 사용비율", False),
+            ("에너지 사용 비중", "에너지 사용 비중", False),
+            ("3개년 평균 에너지 사용량 대비 증감률", "3개년 평균 에너지 사용량 대비 증감률", True),
+            ("시설별 평균 면적 대비 에너지 사용비율", "시설별 평균 면적 대비 에너지 사용비율", False),
         ]
 
-        for i in range(
-            0,
-            len(pie_metrics),
-            2,
-        ):
+        for i in range(0, len(pie_metrics), 2):
             cols = st.columns(2)
-
             for j in range(2):
-
                 if i + j >= len(pie_metrics):
                     break
-
-                (
-                    title_kor,
-                    col_name,
-                    use_abs,
-                ) = pie_metrics[i + j]
-
+                title_kor, col_name, use_abs = pie_metrics[i + j]
                 with cols[j]:
-
                     if col_name in data2_by_org.columns:
-
-                        series = data2_by_org[
-                            col_name
-                        ]
-
-                        # 증감률 차트는
-                        # 실제 +/- 증감률도 함께 표시
-                        show_rate = (
-                            col_name
-                            == "3개년 평균 에너지 사용량 대비 증감률"
-                        )
-
+                        series = data2_by_org[col_name]
+                        show_rate = col_name == "3개년 평균 에너지 사용량 대비 증감률"
                         render_pie_from_series(
                             series,
                             title_kor,
                             use_abs=use_abs,
                             show_rate_in_legend=show_rate,
                         )
-
                     else:
-                        st.info(
-                            f"'{col_name}' 컬럼이 없어 "
-                            "원그래프를 표시할 수 없습니다."
-                        )
+                        st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
     st.markdown("---")
-    st.dataframe(
-        df2_by_org_fmt,
-        use_container_width=True,
-    )
+    st.dataframe(df2_by_org_fmt, use_container_width=True)
 
     # ===========================================================
-    # 2. 피드백 (data_3)
-    # 동일기간 기준
+    # 2. 피드백 (data_3) - 소비량 및 생산량 동일 인터페이스·순서
     # ===========================================================
-    st.subheader(
-        "피드백"
-    )
+    st.subheader("피드백")
 
     try:
-        data3 = (
-            build_data_3_feedback(
-                comparison_year_to_raw,
-                current_year=(
-                    selected_year
-                ),
-            )
+        data3 = build_data_3_feedback(
+            comparison_year_to_raw,
+            current_year=selected_year,
         )
-
     except Exception as e:
-        st.error(
-            "피드백(data_3) 계산 중 오류가 발생했습니다."
-        )
+        st.error("피드백(data_3) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
-    # ===========================================================
-    # 실제 감축률 보정
-    #
-    # 감축률 = -증감률
-    #
-    # 예:
-    # 증감률 +5% → 감축률 -5%
-    # 증감률 -5% → 감축률 +5%
-    #
-    # NDC 4.17%는 목표 기준값이고
-    # 실제 전년대비 감축률이 아님
-    # ===========================================================
+    # 실제 감축률 보정 (감축률 = -증감률)
     if (
-        data3.overall
-        is not None
+        data3.overall is not None
         and not data3.overall.empty
-        and data2_overall
-        is not None
+        and data2_overall is not None
         and not data2_overall.empty
     ):
+        if "전년대비 증감률" in data2_overall.columns:
+            yoy_change = pd.to_numeric(
+                pd.Series([data2_overall.iloc[0].get("전년대비 증감률", 0.0)]),
+                errors="coerce",
+            ).iloc[0]
+            if not pd.isna(yoy_change):
+                data3.overall.loc[data3.overall.index[0], "전년대비 감축률"] = -float(yoy_change)
 
-        # -------------------------------------------------------
-        # 전년대비 감축률
-        # -------------------------------------------------------
-        if (
-            "전년대비 증감률"
-            in data2_overall.columns
-        ):
-            yoy_change = (
-                pd.to_numeric(
-                    pd.Series(
-                        [
-                            data2_overall
-                            .iloc[0]
-                            .get(
-                                "전년대비 증감률",
-                                np.nan,
-                            )
-                        ]
-                    ),
-                    errors="coerce",
-                )
-                .iloc[0]
-            )
-
-            if not pd.isna(
-                yoy_change
-            ):
-                data3.overall.loc[
-                    data3.overall.index[
-                        0
-                    ],
-                    "전년대비 감축률",
-                ] = -float(
-                    yoy_change
-                )
-
-        # -------------------------------------------------------
-        # 3개년 평균 대비 감축률
-        # -------------------------------------------------------
-        if (
-            "3개년 평균 에너지 사용량 대비 증감률"
-            in data2_overall.columns
-        ):
-            avg3_change = (
-                pd.to_numeric(
-                    pd.Series(
-                        [
-                            data2_overall
-                            .iloc[0]
-                            .get(
-                                "3개년 평균 에너지 사용량 대비 증감률",
-                                np.nan,
-                            )
-                        ]
-                    ),
-                    errors="coerce",
-                )
-                .iloc[0]
-            )
-
-            if not pd.isna(
-                avg3_change
-            ):
-                data3.overall.loc[
-                    data3.overall.index[
-                        0
-                    ],
-                    "3개년 대비 감축률",
-                ] = -float(
-                    avg3_change
-                )
+        if "3개년 평균 에너지 사용량 대비 증감률" in data2_overall.columns:
+            avg3_change = pd.to_numeric(
+                pd.Series([data2_overall.iloc[0].get("3개년 평균 에너지 사용량 대비 증감률", 0.0)]),
+                errors="coerce",
+            ).iloc[0]
+            if not pd.isna(avg3_change):
+                data3.overall.loc[data3.overall.index[0], "3개년 대비 감축률"] = -float(avg3_change)
 
     DATA3_OVERALL_FMT = {
-        "권장 에너지 사용량": (
-            "energy_kwh_int"
-        ),
-        "전년대비 감축률": (
-            "percent_2"
-        ),
-        "3개년 대비 감축률": (
-            "percent_2"
-        ),
+        "권장 에너지 사용량": "energy_kwh_int",
+        "전년대비 감축률": "percent_2",
+        "3개년 대비 감축률": "percent_2",
     }
 
     DATA3_BYORG_FMT = {
-        "권장 에너지 사용량": (
-            "energy_kwh_int"
-        ),
-        "권장 사용량 대비 에너지 사용 비율": (
-            "percent_2"
-        ),
+        "권장 에너지 사용량": "energy_kwh_int",
+        "권장 사용량 대비 에너지 사용 비율": "percent_2",
     }
 
-    df3_overall_fmt = (
-        format_table(
-            data3.overall,
-            fmt_rules,
-            DATA3_OVERALL_FMT,
-        )
-    )
+    df3_overall_fmt = format_table(data3.overall, fmt_rules, DATA3_OVERALL_FMT)
+    df3_by_org = data3.by_org.copy()
+    df3_detail = data3.detail.copy()
 
-    df3_by_org = (
-        data3.by_org.copy()
-    )
-
-    df3_detail = (
-        data3.detail.copy()
-    )
-
-    org_order = list(
-        get_org_order()
-    )
-
+    # 요구사항 6: 소속기구 순서(ORG_ORDER) 완벽 동일 정렬
     if view_mode == "공단 전체":
-
+        df3_by_org = df3_by_org.reindex(org_order)
+        df3_detail = df3_detail.reindex(org_order)
+    elif view_mode == "기관별" and selected_org:
         df3_by_org = (
-            df3_by_org.reindex(
-                org_order
-            )
+            df3_by_org.loc[[selected_org]]
+            if selected_org in df3_by_org.index
+            else df3_by_org.iloc[0:0]
         )
-
         df3_detail = (
-            df3_detail.reindex(
-                org_order
-            )
+            df3_detail.loc[[selected_org]]
+            if selected_org in df3_detail.index
+            else df3_detail.iloc[0:0]
         )
 
-    elif (
-        view_mode == "기관별"
-        and selected_org
-    ):
+    df3_by_org_fmt = format_table(df3_by_org, fmt_rules, DATA3_BYORG_FMT)
 
-        if (
-            selected_org
-            in df3_by_org.index
-        ):
-            df3_by_org = (
-                df3_by_org.loc[
-                    [selected_org]
-                ]
-            )
-
-        else:
-            df3_by_org = (
-                df3_by_org.iloc[
-                    0:0
-                ]
-            )
-
-        if (
-            selected_org
-            in df3_detail.index
-        ):
-            df3_detail = (
-                df3_detail.loc[
-                    [selected_org]
-                ]
-            )
-
-        else:
-            df3_detail = (
-                df3_detail.iloc[
-                    0:0
-                ]
-            )
-
-    df3_by_org_fmt = (
-        format_table(
-            df3_by_org,
-            fmt_rules,
-            DATA3_BYORG_FMT,
-        )
-    )
-
-    st.markdown(
-        "**1. 공단 전체 기준**"
-    )
-
-    st.dataframe(
-        df3_overall_fmt,
-        use_container_width=True,
-    )
-
-    st.caption(
-        "* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준"
-    )
+    st.markdown("**1. 공단 전체 기준**")
+    st.dataframe(df3_overall_fmt, use_container_width=True)
+    st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
 
     if comparison_end_month < 12:
         st.caption(
-            f"* 전년대비 감축률 및 3개년 대비 감축률은 "
-            f"각 연도의 동일기간({comparison_period_label}) "
-            f"사용실적을 기준으로 계산합니다."
+            f"* 전년대비 감축률 및 3개년 대비 감축률은 각 연도의 동일기간({comparison_period_label}) 사용실적을 기준으로 계산합니다."
         )
 
     st.markdown("---")
+    st.markdown("**2. 소속기구별**")
 
-    st.markdown(
-        "**2. 소속기구별**"
-    )
-
-    # ===========================================================
-    # 사용 분포 순위 원그래프
-    # ===========================================================
-    if (
-        df3_by_org is None
-        or df3_by_org.empty
-        or len(
-            df3_by_org.index
-        ) < 2
-    ):
-        st.info(
-            "순위 비교를 위한 데이터가 2개 미만입니다."
-        )
-
+    if df3_by_org is None or df3_by_org.empty or len(df3_by_org.index) < 2:
+        st.info("순위 비교를 위한 데이터가 2개 미만입니다.")
     else:
-        st.markdown(
-            "**소속기구별 원그래프 (사용 분포 순위)**"
-        )
-
+        st.markdown("**소속기구별 원그래프 (사용 분포 순위)**")
         rank_metrics = [
-            (
-                "에너지 3개년 평균 증가 순위",
-                "에너지 3개년 평균 증가 순위",
-            ),
-            (
-                "평균 에너지 사용량(연면적 기준) 순위",
-                "평균 에너지 사용량(연면적 기준) 순위",
-            ),
+            ("에너지 3개년 평균 증가 순위", "에너지 3개년 평균 증가 순위"),
+            ("평균 에너지 사용량(연면적 기준) 순위", "평균 에너지 사용량(연면적 기준) 순위"),
         ]
-
-        cols = (
-            st.columns(2)
-        )
-
-        for idx, (
-            title_kor,
-            col_name,
-        ) in enumerate(
-            rank_metrics
-        ):
-
+        cols = st.columns(2)
+        for idx, (title_kor, col_name) in enumerate(rank_metrics):
             with cols[idx]:
-
-                if (
-                    col_name
-                    in df3_by_org.columns
-                ):
-                    rank_series = (
-                        df3_by_org[
-                            col_name
-                        ]
-                        .dropna()
-                    )
-
-                    if (
-                        rank_series.empty
-                    ):
-                        st.info(
-                            f"'{col_name}' 데이터가 없습니다."
-                        )
-
+                if col_name in df3_by_org.columns:
+                    rank_series = pd.to_numeric(df3_by_org[col_name], errors="coerce").dropna()
+                    rank_series = rank_series[rank_series > 0]
+                    if rank_series.empty:
+                        st.info(f"'{col_name}' 데이터가 없습니다.")
                     else:
-                        max_rank = (
-                            rank_series.max()
-                        )
-
-                        score = (
-                            max_rank
-                            + 1
-                            - rank_series
-                        )
-
-                        render_pie_from_series(
-                            score,
-                            title_kor,
-                            use_abs=False,
-                        )
-
+                        max_rank = rank_series.max()
+                        score = max_rank + 1 - rank_series
+                        render_pie_from_series(score, title_kor, use_abs=False)
                 else:
-                    st.info(
-                        f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다."
-                    )
+                    st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
-    st.dataframe(
-        df3_by_org_fmt,
-        use_container_width=True,
-    )
+    st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
+    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
 
-    st.markdown(
-        "**3. 에너지 사용량 관리 대상 상세**"
-    )
-
-    if (
-        df3_detail is None
-        or df3_detail.empty
-    ):
-        st.info(
-            "관리 대상 상세 데이터를 생성할 수 없습니다. "
-            "(데이터 부족 또는 분석 오류)"
-        )
-
+    if df3_detail is None or df3_detail.empty:
+        st.info("관리 대상 상세 데이터를 생성할 수 없습니다.")
     else:
-        st.dataframe(
-            df3_detail,
-            use_container_width=True,
-        )
+        st.dataframe(df3_detail, use_container_width=True)
 
     # ===========================================================
-    # 3. AI 제안 피드백
-    #
-    # data2 / data3 자체가 이미 동일기간 기준이므로
-    # AI 전용 데이터 재계산은 하지 않는다.
+    # 3. AI 제안 피드백 (요구사항 6, 7: 인터페이스 유지 + ARGON 엔진 전면 고도화)
     # ===========================================================
     st.markdown("---")
-
-    st.subheader(
-        "AI 제안 피드백"
-    )
+    st.subheader("AI 제안 피드백")
+    st.caption(f"⚙️ 구동 엔진: **{ARGON_ENGINE_VERSION}** (환산계수 및 다중 지표 자동 추론 활성화)")
 
     if comparison_end_month < 12:
         st.info(
-            f"{selected_year}년 데이터는 "
-            f"**{comparison_period_label}**까지 입력되어 있습니다. "
-            f"AI 제안 피드백은 연간 사용량이 아닌 "
-            f"**각 연도의 동일기간({comparison_period_label}) "
-            f"사용량을 기준으로 비교 분석**합니다."
+            f"{selected_year}년 데이터는 **{comparison_period_label}**까지 입력되어 있습니다. "
+            f"AI 제안 피드백은 연간 사용량이 아닌 **각 연도의 동일기간({comparison_period_label}) 사용량을 기준으로 비교 분석**합니다."
         )
-
     else:
-        st.caption(
-            f"{selected_year}년 전체 연도 데이터를 기준으로 분석합니다."
-        )
+        st.caption(f"{selected_year}년 전체 연도 데이터를 기준으로 분석합니다.")
 
-    # -----------------------------------------------------------
-    # AI에서도 동일기간 data2 / data3 그대로 사용
-    # -----------------------------------------------------------
-    ai_data2 = data2
-    ai_data3 = data3
+    ai_data2_overall = data2_overall.copy()
+    ai_data2_by_org = data2_by_org.copy()
+    ai_df3_by_org = df3_by_org.copy()
 
-    ai_data2_overall = (
-        ai_data2.overall.copy()
-    )
-
-    ai_data2_by_org = (
-        ai_data2.by_org.copy()
-    )
-
-    ai_df3_by_org = (
-        ai_data3.by_org.copy()
-    )
-
-    # 보기 범위와 동일하게 기관 정렬
     if view_mode == "공단 전체":
-
+        ai_data2_by_org = ai_data2_by_org.reindex(org_order)
+        ai_df3_by_org = ai_df3_by_org.reindex(org_order)
+    elif view_mode == "기관별" and selected_org:
         ai_data2_by_org = (
-            ai_data2_by_org.reindex(
-                org_order
-            )
+            ai_data2_by_org.loc[[selected_org]]
+            if selected_org in ai_data2_by_org.index
+            else ai_data2_by_org.iloc[0:0]
         )
-
         ai_df3_by_org = (
-            ai_df3_by_org.reindex(
-                org_order
-            )
+            ai_df3_by_org.loc[[selected_org]]
+            if selected_org in ai_df3_by_org.index
+            else ai_df3_by_org.iloc[0:0]
         )
 
-    elif (
-        view_mode == "기관별"
-        and selected_org
-    ):
-
-        if (
-            selected_org
-            in ai_data2_by_org.index
-        ):
-            ai_data2_by_org = (
-                ai_data2_by_org.loc[
-                    [selected_org]
-                ]
-            )
-
-        else:
-            ai_data2_by_org = (
-                ai_data2_by_org.iloc[
-                    0:0
-                ]
-            )
-
-        if (
-            selected_org
-            in ai_df3_by_org.index
-        ):
-            ai_df3_by_org = (
-                ai_df3_by_org.loc[
-                    [selected_org]
-                ]
-            )
-
-        else:
-            ai_df3_by_org = (
-                ai_df3_by_org.iloc[
-                    0:0
-                ]
-            )
-
-    # ===========================================================
-    # 종합분석
-    # ===========================================================
-    st.markdown(
-        "#### (종합분석)"
+    # (종합분석)
+    st.markdown("#### (종합분석)")
+    global_text = generate_argon_global_feedback_text(
+        selected_year=selected_year,
+        df3_overall=data3.overall,
+        data2_overall=ai_data2_overall,
+        data2_by_org=ai_data2_by_org,
+        df3_by_org=ai_df3_by_org,
+        period_label=comparison_period_label,
+        is_production=is_production,
     )
+    st.markdown(global_text)
 
-    global_text = (
-        generate_global_feedback_text(
-            selected_year=(
-                selected_year
-            ),
-            df3_overall=(
-                ai_data3.overall
-            ),
-            data2_overall=(
-                ai_data2_overall
-            ),
-            data2_by_org=(
-                ai_data2_by_org
-            ),
-            df3_by_org=(
-                ai_df3_by_org
-            ),
-        )
-    )
-
-    st.markdown(
-        global_text
-    )
-
-    # ===========================================================
-    # 소속기구별 맞춤형 피드백
-    # ===========================================================
+    # [소속기구별 맞춤형 피드백] - 소속기구 순서(ORG_ORDER) 완벽 동일
     st.markdown("---")
+    st.markdown("#### [소속기구별 맞춤형 피드백]")
 
-    st.markdown(
-        "#### [소속기구별 맞춤형 피드백]"
-    )
-
-    if (
-        ai_data2_by_org
-        is None
-        or ai_data2_by_org.empty
-    ):
-        st.info(
-            "소속기구별 피드백을 생성할 데이터가 없습니다."
-        )
-
+    if ai_data2_by_org is None or ai_data2_by_org.empty:
+        st.info("소속기구별 피드백을 생성할 데이터가 없습니다.")
     else:
-        if (
-            "면적대비 에너지 사용비율"
-            in ai_data2_by_org.columns
-        ):
-            upa_mean = (
-                ai_data2_by_org[
-                    "면적대비 에너지 사용비율"
-                ]
-                .mean()
-            )
-
-        else:
-            upa_mean = np.nan
-
-        total_orgs = len(
-            ai_data2_by_org
+        upa_series = (
+            pd.to_numeric(ai_data2_by_org["면적대비 에너지 사용비율"], errors="coerce")
+            if "면적대비 에너지 사용비율" in ai_data2_by_org.columns
+            else pd.Series(dtype=float)
         )
+        upa_valid = upa_series[upa_series > 0]
+        upa_mean = float(upa_valid.mean()) if not upa_valid.empty else 0.0
+        total_orgs = len(ai_data2_by_org)
 
-        # 기관당 정확히 1회만 출력
-        for org in (
-            ai_data2_by_org.index
-        ):
-
-            if (
-                org
-                not in ai_df3_by_org.index
-            ):
+        for org in ai_data2_by_org.index:
+            if org not in ai_df3_by_org.index:
                 continue
 
-            # reindex 결과 NaN 행 제외
-            row2 = (
-                ai_data2_by_org.loc[
-                    org
-                ]
-            )
+            row2 = ai_data2_by_org.loc[org]
+            row3 = ai_df3_by_org.loc[org]
 
-            row3 = (
-                ai_df3_by_org.loc[
-                    org
-                ]
-            )
-
-            if (
-                row2.isna().all()
-                and row3.isna().all()
-            ):
+            if row2.isna().all() and row3.isna().all():
                 continue
 
-            inst_text = (
-                generate_institution_feedback_text(
-                    org_name=org,
-                    row2=row2,
-                    row3=row3,
-                    upa_mean=(
-                        upa_mean
-                    ),
-                    total_orgs=(
-                        total_orgs
-                    ),
-                )
+            inst_text = generate_argon_institution_feedback_text(
+                org_name=org,
+                row2=row2,
+                row3=row3,
+                upa_mean=upa_mean,
+                total_orgs=total_orgs,
+                is_production=is_production,
             )
-
-            st.markdown(
-                inst_text
-            )
-
+            st.markdown(inst_text)
             st.markdown("")
 
-    # ===========================================================
-    # 공단 공통 제안
-    # ===========================================================
+    # [에너지 절감을 위한 공단 공통 제안]
     st.markdown("---")
-
+    st.markdown("#### [에너지 절감을 위한 공단 공통 제안]")
     st.markdown(
-        "#### [에너지 절감을 위한 공단 공통 제안]"
-    )
-
-    st.markdown(
-        generate_common_recommendations_text(
-            df3_by_org=(
-                ai_df3_by_org
-            ),
-            data2_by_org=(
-                ai_data2_by_org
-            ),
+        generate_argon_common_recommendations_text(
+            df3_by_org=ai_df3_by_org,
+            data2_by_org=ai_data2_by_org,
+            is_production=is_production,
         )
     )
-
 
 
 # ===========================================================
 # 📂 업로드 탭 렌더링
 # ===========================================================
 def _compute_upload_signature(uploaded_files) -> Optional[str]:
-    """
-    업로드된 파일 목록에 대한 '변경 여부' 식별용 시그니처.
-
-    - 파일명 + 파일 크기 + 내용(md5)을 합쳐 해시
-    - 같은 파일 세트면 시그니처도 항상 동일
-    """
     if not uploaded_files:
         return None
-
     parts = []
     for f in uploaded_files:
         data = f.getvalue()
@@ -2471,29 +906,24 @@ def render_upload_tab(
     df_raw_all: Optional[pd.DataFrame],
 ) -> None:
     st.subheader("공단 에너지 사용량 파일 업로드")
-
     st.write(
         "- 연도별 《에너지 사용량관리.xlsx》 파일을 업로드하면, "
-        "df_raw(U/V/W 기반이 아닌 연단위 기준)로 변환하여 분석에 사용합니다."
+        "df_raw(연단위 및 월별 기준)로 변환하여 분석에 사용합니다."
     )
 
-    # 1) 파일 업로드 위젯
     uploaded_files = st.file_uploader(
         "연도별 에너지 사용량 파일 업로드 (여러 개 선택 가능)",
         type=["xlsx"],
         accept_multiple_files=True,
     )
 
-    # 현재 업로드 세트의 시그니처 계산
     current_sig = _compute_upload_signature(uploaded_files) if uploaded_files else None
     last_sig = st.session_state.get("last_upload_sig")
 
-    # 2) 새 업로드 세트일 때만 처리 (== 1회 처리 보장)
     if uploaded_files and current_sig and current_sig != last_sig:
         if not DATA_DIR.exists():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 업로드 이전에 존재하던 로컬 파일 목록(연도 기준)
         from modules.loader import discover_local_energy_files, get_year_to_file, load_energy_files
 
         local_before = discover_local_energy_files()
@@ -2502,7 +932,6 @@ def render_upload_tab(
         new_years: list[int] = []
         updated_years: list[int] = []
 
-        # 2-1) 파일 저장 (연도별로 항상 덮어쓰기)
         for f in uploaded_files:
             year = infer_year_from_filename(f.name)
             if year is None:
@@ -2518,18 +947,14 @@ def render_upload_tab(
             with open(target_path, "wb") as out:
                 out.write(f.getvalue())
 
-        # 세션 업로드 캐시는 더 이상 사용하지 않으므로 비움
         st.session_state["year_to_file"] = {}
 
-        # 2-2) 저장된 파일 기준으로 year_to_raw / df_raw_all 캐시 재생성
         merged = get_year_to_file()
         if merged:
             try:
                 year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-
-                st.session_state["year_to_raw_consumption_v3"] = year_to_raw_tmp
-                st.session_state["df_raw_all_consumption_v3"] = df_raw_all_tmp
-
+                st.session_state["year_to_raw_all_v4"] = year_to_raw_tmp
+                st.session_state["df_raw_all_v4"] = df_raw_all_tmp
                 df_raw_all = df_raw_all_tmp
 
                 if new_years:
@@ -2539,21 +964,12 @@ def render_upload_tab(
                     years_str = ", ".join(str(y) for y in sorted(set(updated_years)))
                     st.success(f"기존 연도 파일 업데이트 완료: {years_str}년")
 
-                # 이 업로드 세트는 처리 완료 → 같은 세트는 다시 처리하지 않도록 기록
                 st.session_state["last_upload_sig"] = current_sig
-
             except Exception as e:
-                st.error(
-                    "에너지 사용량 파일 로딩 중 오류가 발생했습니다. "
-                    "엑셀 형식과 시트를 확인해 주세요."
-                )
+                st.error("에너지 사용량 파일 로딩 중 오류가 발생했습니다. 엑셀 형식과 시트를 확인해 주세요.")
                 st.exception(e)
                 return
 
-    # 이미 처리된 업로드 세트라면(= current_sig == last_sig) 추가 연산 생략
-    # → Streamlit 기본 rerun 1회만 일어나고, load_energy_files 재호출 없음
-
-    # 3) 현재 인식된 파일 목록 표시
     from modules.loader import get_year_to_file, load_energy_files
 
     st.markdown("#### 인식된 연도별 파일 목록")
@@ -2569,32 +985,29 @@ def render_upload_tab(
 
     st.markdown("---")
 
-    # 4) df_raw_all 이 아직 없으면 (최초 실행) 로컬 파일 기준으로 한 번만 로딩
     if (df_raw_all is None or df_raw_all.empty) and merged:
         try:
             year_to_raw_tmp, df_raw_all_tmp = load_energy_files(merged)
-
-            st.session_state["year_to_raw_consumption_v3"] = year_to_raw_tmp
-            st.session_state["df_raw_all_consumption_v3"] = df_raw_all_tmp
-
+            st.session_state["year_to_raw_all_v4"] = year_to_raw_tmp
+            st.session_state["df_raw_all_v4"] = df_raw_all_tmp
             df_raw_all = df_raw_all_tmp
-
             st.success(f"df_raw가 새로 생성되었습니다. 전체 행 수: {len(df_raw_all)}")
         except Exception as e:
             st.error("df_raw 생성 중 오류가 발생했습니다. 엑셀 형식을 확인해 주세요.")
             st.exception(e)
             return
 
-    # 5) 여전히 df_raw_all 이 없으면 표 생성 불가
     if df_raw_all is None or df_raw_all.empty:
         st.info("아직 분석 가능한 df_raw 데이터가 없습니다. 먼저 연도별 파일을 업로드해 주세요.")
         return
 
-    # 6) data_1용 백데이터 분석 표 생성
     try:
         from modules.analyzer import build_data1_tables
-
-        tbl_usage, tbl_area, tbl_avg3 = build_data1_tables(df_raw_all)
+        # 업로드 탭의 기본 백데이터 분석은 소비 에너지원 기준으로 집계
+        df_cons_only = df_raw_all[~df_raw_all["에너지종류"].isin(RENEWABLE_FUELS_ORDER)].copy()
+        if df_cons_only.empty:
+            df_cons_only = df_raw_all.copy()
+        tbl_usage, tbl_area, tbl_avg3 = build_data1_tables(df_cons_only)
     except Exception as e:
         st.error("data_1(백데이터 분석) 표 생성 중 오류가 발생했습니다.")
         st.exception(e)
@@ -2604,30 +1017,21 @@ def render_upload_tab(
 
     st.markdown("### 1. 연도×기관 에너지 사용량 (연단위)")
     tbl_usage_fmt = format_table(
-        tbl_usage,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        default_fmt_name="integer_comma",
+        tbl_usage, fmt_rules, column_fmt_map=no_format_for_label, default_fmt_name="integer_comma"
     )
     st.dataframe(tbl_usage_fmt, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.markdown("### 2. 연도×기관 연면적")
     tbl_area_fmt = format_table(
-        tbl_area,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        default_fmt_name="integer_comma",
+        tbl_area, fmt_rules, column_fmt_map=no_format_for_label, default_fmt_name="integer_comma"
     )
     st.dataframe(tbl_area_fmt, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.markdown("### 3. 연도별 3개년 평균 에너지 사용량")
     tbl_avg3_fmt = format_table(
-        tbl_avg3,
-        fmt_rules,
-        column_fmt_map=no_format_for_label,
-        default_fmt_name="integer_comma",
+        tbl_avg3, fmt_rules, column_fmt_map=no_format_for_label, default_fmt_name="integer_comma"
     )
     st.dataframe(tbl_avg3_fmt, use_container_width=True, hide_index=True)
 
@@ -2639,12 +1043,6 @@ def render_debug_tab(
     year_to_raw: Mapping[int, pd.DataFrame],
     df_raw_all: pd.DataFrame,
 ) -> None:
-
-    # =======================================================
-    # Easter Egg
-    # 우측의 작은 점을 5회 클릭하면
-    # 화면 중앙에 약 5초간 메시지 표시
-    # =======================================================
     col_title, col_secret = st.columns([30, 1])
 
     with col_title:
@@ -2654,129 +1052,59 @@ def render_debug_tab(
         if "easter_egg_count" not in st.session_state:
             st.session_state["easter_egg_count"] = 0
 
-        if st.button(
-            "·",
-            key="easter_egg_trigger",
-            help=None,
-        ):
+        if st.button("·", key="easter_egg_trigger", help=None):
             st.session_state["easter_egg_count"] += 1
-
             if st.session_state["easter_egg_count"] >= 5:
                 st.markdown(
                     """
                     <style>
                     @keyframes easterEggFade {
-                        0% {
-                            opacity: 0;
-                            transform: translate(-50%, -50%) scale(0.95);
-                        }
-
-                        10% {
-                            opacity: 1;
-                            transform: translate(-50%, -50%) scale(1);
-                        }
-
-                        85% {
-                            opacity: 1;
-                            transform: translate(-50%, -50%) scale(1);
-                        }
-
-                        100% {
-                            opacity: 0;
-                            transform: translate(-50%, -50%) scale(0.95);
-                            visibility: hidden;
-                        }
+                        0% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); }
+                        10% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                        85% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                        100% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); visibility: hidden; }
                     }
-
                     .easter-egg-toast {
-                        position: fixed;
-                        top: 50%;
-                        left: 50%;
+                        position: fixed; top: 50%; left: 50%;
                         transform: translate(-50%, -50%);
-
                         z-index: 999999;
-
                         background: rgba(35, 38, 45, 0.96);
                         color: white;
-
-                        padding: 20px 32px;
-                        border-radius: 12px;
-
-                        font-size: 17px;
-                        font-weight: 600;
-                        text-align: center;
-
+                        padding: 20px 32px; border-radius: 12px;
+                        font-size: 17px; font-weight: 600; text-align: center;
                         box-shadow: 0 8px 30px rgba(0, 0, 0, 0.40);
-
                         white-space: nowrap;
-
                         animation: easterEggFade 5s ease-in-out forwards;
-
                         pointer-events: none;
                     }
                     </style>
-
                     <div class="easter-egg-toast">
                         ★짜☆잔★ 프로그램 제작자: 한국보훈복지의료공단 김두호 과장 ★짜☆잔★
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
-
-                # 5회 클릭 후 카운터 초기화
-                # 이후 다시 5회 클릭하면 재실행 가능
                 st.session_state["easter_egg_count"] = 0
 
-    # =======================================================
-    # 기존 디버그 / 진단 기능
-    # =======================================================
     years_available = sorted(year_to_raw.keys())
+    st.write("로딩된 연도:", years_available)
 
-    st.write(
-        "로딩된 연도:",
-        years_available,
-    )
-
-    info_rows = []
-
-    for year, df in year_to_raw.items():
-        info_rows.append(
-            {
-                "연도": year,
-                "행 수": len(df),
-                "기관 수": df["기관명"].nunique(),
-            }
-        )
-
-    st.dataframe(
-        pd.DataFrame(info_rows),
-        use_container_width=True,
-    )
+    info_rows = [
+        {"연도": year, "행 수": len(df), "기관 수": df["기관명"].nunique()}
+        for year, df in year_to_raw.items()
+    ]
+    st.dataframe(pd.DataFrame(info_rows), use_container_width=True)
 
     st.markdown("---")
-
-    st.subheader(
-        "df_raw 전체 데이터 (상위 100행)"
-    )
-
-    st.dataframe(
-        df_raw_all.head(100),
-        use_container_width=True,
-    )
+    st.subheader("df_raw 전체 데이터 (상위 100행)")
+    st.dataframe(df_raw_all.head(100), use_container_width=True)
 
     st.markdown("---")
-
-    st.subheader(
-        "df_raw 컬럼 정보"
-    )
-
+    st.subheader("df_raw 컬럼 정보")
     st.json(
         {
             "columns": df_raw_all.columns.tolist(),
-            "dtypes": {
-                c: str(t)
-                for c, t in df_raw_all.dtypes.items()
-            },
+            "dtypes": {c: str(t) for c, t in df_raw_all.dtypes.items()},
         }
     )
 
@@ -2784,212 +1112,49 @@ def render_debug_tab(
 # ===========================================================
 # 메인 함수
 # ===========================================================
-# 소비 / 생산 독립 화면
-import json
-import plotly.express as px
-
-from modules.loader import load_energy_datasets
-from modules.analyzer import (
-    prepare_energy_metrics, period_summary, complete_total,
-    select_period, integrated_electricity, settings_for_year,
-)
-from modules.feedback import build_rule_feedback, generate_energy_feedback
-
-
-@st.cache_data(show_spinner=False)
-def load_dashboard_data(file_items):
-    return load_energy_datasets(file_items)
-
-
-def metric_text(value, suffix=""):
-    return "산정 대기" if value is None or pd.isna(value) else f"{value:,.1f}{suffix}"
-
-
-def render_energy_view(frame, year, end_month, production_view):
-    selected, total, yoy, ranking = period_summary(frame, year, end_month)
-    if selected.empty or selected["수량"].notna().sum() == 0:
-        st.info("선택 조건의 입력 데이터가 없습니다.")
-        return
-
-    carbon_column = "감축추정_tCO2eq" if production_view else "배출량_tCO2eq"
-    carbon = complete_total(selected, carbon_column)
-    k1, k2, k3 = st.columns(3)
-    k1.metric("생산 에너지량" if production_view else "소비 에너지량", metric_text(total, " kWh"))
-    k2.metric("전년 동일 기간 대비", metric_text(yoy, "%"))
-    k3.metric("회피배출 추정량" if production_view else "배출량", metric_text(carbon, " tCO₂eq"))
-    st.caption(
-        f"{year}년 1~{end_month}월. 에너지량은 입력된 월별 수량의 환산 합계입니다. "
-        "전기·열을 에너지량으로 합산하며, 미설정 환산계수가 있으면 산정 대기로 표시합니다."
-    )
-    missing = int(selected["수량"].isna().sum())
-    if missing:
-        st.warning(
-            f"선택 기간에 미입력 값 {missing}개가 있습니다. "
-            "표시 합계는 입력분 누계이고, 전년 증감률은 완전한 입력 자료에서만 계산합니다."
-        )
-
-    observed = selected[selected["수량"].notna()]
-    for unit, group in observed.groupby("단위"):
-        monthly = (
-            group.groupby(["월", "기관명", "에너지원"])["수량"].sum().reset_index()
-        )
-        monthly["계열"] = monthly["기관명"] + " · " + monthly["에너지원"]
-        figure = px.line(
-            monthly, x="월", y="수량", color="계열", markers=True,
-            title=f"월별 {'생산량' if production_view else '소비량'} · {unit}",
-        )
-        figure.update_xaxes(dtick=1)
-        st.plotly_chart(figure, use_container_width=True)
-
-    rows = []
-    for compare_year in sorted(frame["연도"].unique()):
-        period = select_period(frame, compare_year, end_month)
-        rows.append({
-            "연도": str(compare_year),
-            "에너지_kWh": complete_total(period, "에너지_kWh"),
-            "미입력수": int(period["수량"].isna().sum()),
-        })
-    st.plotly_chart(
-        px.bar(
-            pd.DataFrame(rows), x="연도", y="에너지_kWh", hover_data=["미입력수"],
-            title=f"연도별 동일 기간 추이 · 1~{end_month}월",
-        ), use_container_width=True,
-    )
-    st.caption("종료월 12월을 선택하면 연간 추이가 표시됩니다.")
-
-    # 분기와 반기를 함께 제공하되 선택 종료월 이후를 합산하지 않는다.
-    for period_name, length in [("분기", 3), ("반기", 6)]:
-        periods = observed.assign(기간=(observed["월"] - 1) // length + 1)
-        values = (
-            periods.groupby(["기간", "에너지원", "단위"])["수량"]
-            .sum().reset_index()
-        )
-        for unit, data in values.groupby("단위"):
-            st.plotly_chart(
-                px.bar(
-                    data, x="기간", y="수량", color="에너지원",
-                    title=f"{year}년 {period_name}별 누계 · {unit}",
-                ), use_container_width=True,
-            )
-
-    if not ranking.empty:
-        st.plotly_chart(
-            px.bar(
-                ranking, x="기관명", y="에너지_kWh", color="에너지원",
-                title="기관별 생산 기여도" if production_view else "기관별 소비량",
-            ), use_container_width=True,
-        )
-        display = ranking if production_view else ranking.drop(
-            columns=["확인용량_kW", "등가운전시간_h"]
-        )
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
-    if production_view:
-        st.caption(
-            "등가운전시간 = 생산 에너지량 ÷ 확인된 정격용량. "
-            "태양광 kW와 지열 kWth를 구분하며, 용량 단위 미확인 설비는 계산하지 않습니다. "
-            "실제 변환효율 분석에는 일사량 또는 투입에너지가 필요합니다."
-        )
-    with st.expander("월별 상세 데이터"):
-        st.dataframe(selected, use_container_width=True, hide_index=True)
-
-
-def _read_energy_settings():
-    try:
-        return (
-            dict(st.secrets.get("energy", {})),
-            st.secrets.get("OPENAI_API_KEY", ""),
-            st.secrets.get("OPENAI_MODEL", "gpt-4o"),
-        )
-    except FileNotFoundError:
-        return {}, "", "gpt-4o"
-
-
-
-def render_renewable_dashboard(year_to_file, selected_year, selected_org):
-    import io
-    items = tuple(
-        (f"energy_{year}.xlsx",
-         file.read_bytes() if isinstance(file, Path) else file.getvalue())
-        for year, file in sorted(year_to_file.items())
-    )
-    try:
-        consumption, production, issues = load_dashboard_data(items)
-        settings, api_key, model = _read_energy_settings()
-        consumption = prepare_energy_metrics(consumption, settings)
-        production = prepare_energy_metrics(production, settings)
-    except Exception as exc:
-        st.error(f"신재생 데이터 확인이 필요합니다. {exc}")
-        return
-    if selected_org:
-        consumption = consumption[consumption["기관명"].eq(selected_org)].copy()
-        production = production[production["기관명"].eq(selected_org)].copy()
-    entered = production[
-        production["연도"].eq(selected_year)
-        & production["수량"].notna() & production["수량"].ne(0)
-    ]
-    end_month = int(entered["월"].max()) if not entered.empty else 12
-    fuel = st.selectbox("신재생 에너지 종류", ["전체", "태양광", "지열"])
-    frame = production if fuel == "전체" else production[production["에너지원"].eq(fuel)]
-    render_energy_view(frame, selected_year, end_month, True)
-    config = settings_for_year(settings, selected_year)
-    key = f"{selected_year}|{end_month}|{selected_org or '전체'}"
-    confirmed = config.get("re100_verified_kwh", {}).get(key)
-    total = config.get("total_electricity_kwh", {}).get(key)
-    rate = confirmed / total * 100 if (
-        isinstance(confirmed, (int, float)) and isinstance(total, (int, float))
-        and total > 0 and 0 <= confirmed <= total
-    ) else np.nan
-    col1, col2 = st.columns(2)
-    col1.metric("확인된 재생전력 사용량", metric_text(confirmed, " kWh"))
-    col2.metric("K-RE100 확인 전력 사용 비율", metric_text(rate, "%"))
-    st.caption("K-RE100 지표는 기관 전체 기준이며 확인된 동일 기간 전력사용량 설정이 필요합니다.")
-    st.subheader("신재생 및 소비 통합 진단")
-    baseline = config.get("baseline_tco2", {}).get(f"{selected_year}|{selected_org or '전체'}")
-    try:
-        rule = build_rule_feedback(consumption, production, selected_year, end_month, baseline)
-        net = integrated_electricity(consumption, production, selected_year, end_month, settings)
-    except ValueError as exc:
-        st.error(str(exc))
-        return
-    st.dataframe(net, use_container_width=True, hide_index=True)
-    st.write(rule)
-    payload = {
-        "연도": int(selected_year), "종료월": end_month,
-        "기관": selected_org or "전체",
-        "전력수급": json.loads(net.to_json(orient="records", force_ascii=False)),
-        "평가편람": config.get("evaluation_guidance", "미제공"),
-    }
-    request_id = hashlib.sha256(
-        (json.dumps(payload, ensure_ascii=False) + rule + model).encode()
-    ).hexdigest()
-    if st.button("AI 맞춤 실행 가이드 생성"):
-        with st.spinner("실행 가이드를 생성하고 있습니다."):
-            text, source = generate_energy_feedback(payload, rule, api_key, model)
-        st.session_state["renewable_ai_result"] = (request_id, text, source)
-    result = st.session_state.get("renewable_ai_result")
-    if result and result[0] == request_id:
-        st.caption(result[2])
-        st.markdown(result[1])
-    with st.expander("신재생 입력 데이터 점검"):
-        for issue in issues:
-            st.warning(issue)
-        st.dataframe(production, use_container_width=True, hide_index=True)
-
-
 def main() -> None:
+    # 1. 제목 수정: Bohun Energy Dashboard(보훈공단 에너지 관리)
     st.set_page_config(
-        page_title="보훈공단 에너지 관리 대시보드",
+        page_title="Bohun Energy Dashboard(보훈공단 에너지 관리)",
         layout="wide",
     )
 
-    st.title("보훈공단 에너지 관리 대시보드")
-    dashboard_view = st.radio(
-        "대시보드 선택",
-        ["에너지 소비량 대시보드", "신재생에너지 생산량 대시보드"],
-        horizontal=True,
-        label_visibility="collapsed",
+    st.title("Bohun Energy Dashboard(보훈공단 에너지 관리)")
+
+    # 대시보드 링크 영역 표시
+    st.markdown(
+        "🔗 **대시보드 바로가기 링크**: "
+        "[Bohun Energy Dashboard(보훈공단 에너지 관리)](https://bohunenergydashboard-yzi3axra3j7rlrscwqrnt6.streamlit.app/)"
     )
+
+    # 2. 배치 교정: 에너지 소비량 대시보드, 신재생에너지 생산량 대시보드 체크박스를 대시보드 링크 아래로 배치
+    if "active_dashboard_mode" not in st.session_state:
+        st.session_state["active_dashboard_mode"] = "consumption"
+
+    def _on_select_consumption():
+        st.session_state["active_dashboard_mode"] = "consumption"
+
+    def _on_select_production():
+        st.session_state["active_dashboard_mode"] = "production"
+
+    is_cons_mode = st.session_state["active_dashboard_mode"] == "consumption"
+    chk_col1, chk_col2, _ = st.columns([2.2, 2.5, 5.3])
+    with chk_col1:
+        st.checkbox(
+            "에너지 소비량 대시보드",
+            value=is_cons_mode,
+            key="chk_consumption_view",
+            on_change=_on_select_consumption,
+        )
+    with chk_col2:
+        st.checkbox(
+            "신재생에너지 생산량 대시보드",
+            value=not is_cons_mode,
+            key="chk_production_view",
+            on_change=_on_select_production,
+        )
+
+    is_production = st.session_state["active_dashboard_mode"] == "production"
 
     # -------------------------------------------------------
     # 0. spec 로딩
@@ -3002,18 +1167,14 @@ def main() -> None:
 
     fmt_rules: Dict[str, Dict] = spec.get("formatting_rules", {})
 
-        # -------------------------------------------------------
+    # -------------------------------------------------------
     # 1. 에너지 사용량 파일 로딩 (캐시 + 실제 파일 동기화)
     # -------------------------------------------------------
-    year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get(
-        "year_to_raw_consumption_v3", {}
-    )
-    df_raw_all: Optional[pd.DataFrame] = st.session_state.get("df_raw_all_consumption_v3")
+    year_to_raw: Dict[int, pd.DataFrame] = st.session_state.get("year_to_raw_all_v4", {})
+    df_raw_all: Optional[pd.DataFrame] = st.session_state.get("df_raw_all_v4")
 
-    # 현재 인식된 파일 목록
     year_to_file = get_year_to_file()
 
-    # 🔹 파일은 있는데 캐시가 없거나, 구버전 캐시(에너지종류 컬럼 없음)이면 강제 재로딩
     cache_needs_reload = (
         not year_to_raw
         or df_raw_all is None
@@ -3023,8 +1184,8 @@ def main() -> None:
     if year_to_file and cache_needs_reload:
         try:
             year_to_raw, df_raw_all = load_energy_files(year_to_file)
-            st.session_state["year_to_raw_consumption_v3"] = year_to_raw
-            st.session_state["df_raw_all_consumption_v3"] = df_raw_all
+            st.session_state["year_to_raw_all_v4"] = year_to_raw
+            st.session_state["df_raw_all_v4"] = df_raw_all
         except Exception as e:
             st.warning(
                 "에너지 사용량 파일을 읽는 중 오류가 발생했습니다. "
@@ -3034,22 +1195,16 @@ def main() -> None:
             year_to_raw = {}
             df_raw_all = None
     elif not year_to_file:
-        # 파일 자체가 없으면 캐시도 비움
         year_to_raw = {}
         df_raw_all = None
 
-    # -------------------------------------------------------
-    # 1-1. 현재 분석 가능한 연도 목록 계산
-    # -------------------------------------------------------
     if year_to_raw:
         years_available = sorted(year_to_raw.keys())
     else:
         years_available = []
 
-
-
     # -------------------------------------------------------
-    # 2. 사이드바 필터
+    # 2. 사이드바 필터 (요구사항 3: 소비량/생산량 대시보드별 에너지 종류 상호 숨김)
     # -------------------------------------------------------
     with st.sidebar:
         st.header("필터")
@@ -3057,10 +1212,7 @@ def main() -> None:
         view_mode = st.radio("보기 범위", ["공단 전체", "기관별"], index=0)
 
         if years_available:
-            # 항상 실제 로딩된 데이터 중 가장 최근 이행연도를 기본값으로 사용한다.
-            # master_energy_spec.json의 current_year 값이 오래되어도 최신 업로드 연도가 우선한다.
             default_year = max(years_available)
-
             selected_year = st.selectbox(
                 "이행연도 선택",
                 years_available,
@@ -3095,31 +1247,47 @@ def main() -> None:
             selected_org = None
             st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
 
-        # 업로드 데이터의 연료/에너지원 구분을 실제 필터 옵션으로 사용한다.
-        energy_order = [    "전기",    "가스(LNG)",    "가스(LPG)",    "등유",    "지역난방",]
-        if selected_year is not None and df_raw_all is not None and not df_raw_all.empty and "에너지종류" in df_raw_all.columns:
+        # 3. 에너지 소비량 대시보드 선택 시 신재생에너지(태양광, 지열) 안 보이도록 조치,
+        #    신재생에너지 생산량 대시보드 선택 시 소비 에너지원 안 보이도록 조치
+        if is_production:
+            allowed_order = list(RENEWABLE_FUELS_ORDER)
+            excluded_set = set(CONSUMPTION_FUELS_ORDER) | {"기타", "용수"}
+        else:
+            allowed_order = list(CONSUMPTION_FUELS_ORDER)
+            excluded_set = set(RENEWABLE_FUELS_ORDER) | {"용수"}
+
+        if (
+            selected_year is not None
+            and df_raw_all is not None
+            and not df_raw_all.empty
+            and "에너지종류" in df_raw_all.columns
+        ):
             energy_values = (
                 df_raw_all.loc[df_raw_all["연도"] == selected_year, "에너지종류"]
                 .dropna()
                 .astype(str)
                 .str.strip()
             )
-            available_energy_types = [e for e in energy_order if e in set(energy_values)]
-            extras = sorted(
-                e for e in set(energy_values)
-                if e and e not in energy_order and e != "기타"
-            )
-            available_energy_types.extend(extras)
-            if "기타" in set(energy_values):
-                available_energy_types.append("기타")
+            valid_values = set(energy_values) - excluded_set
+            available_energy_types = [e for e in allowed_order if e in valid_values]
+            if not is_production:
+                extras = sorted(
+                    e for e in valid_values
+                    if e and e not in allowed_order and e != "기타"
+                )
+                available_energy_types.extend(extras)
         else:
-            available_energy_types = []
+            available_energy_types = list(allowed_order)
+
+        if not available_energy_types:
+            available_energy_types = list(allowed_order)
 
         selected_energy = st.selectbox(
             "에너지 종류",
             ["전체"] + available_energy_types,
             index=0,
-            help="업로드 파일의 연료/에너지원 구분에 따라 모든 대시보드 분석을 필터링합니다.",
+            key=f"energy_type_select_{'prod' if is_production else 'cons'}",
+            help="선택한 대시보드(소비량 또는 신재생 생산량)에 해당하는 에너지원만 표시 및 필터링합니다.",
         )
 
     # -------------------------------------------------------
@@ -3129,12 +1297,24 @@ def main() -> None:
         ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
     )
 
-    # 분석에 사용할 year_to_raw
-    # 기관/에너지 종류 필터를 모든 연도에 동일하게 적용하여 월별·연도별·분기/반기 및 분석표가 일관되게 동작하도록 한다.
+    # 대시보드 모드(소비 vs 신재생 생산) 및 사이드바 필터를 모든 연도에 일관되게 적용
     if year_to_raw:
         filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
+        target_fuel_set = (
+            set(RENEWABLE_FUELS_ORDER)
+            if is_production
+            else (set(CONSUMPTION_FUELS_ORDER) | {"기타"})
+        )
+
         for year, df in year_to_raw.items():
             sub = df.copy()
+
+            # 모드별 에너지원 엄격 분리 (소비 대시보드에서는 태양광/지열 제외, 생산에서는 소비원 제외)
+            if "에너지종류" in sub.columns:
+                if is_production:
+                    sub = sub[sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
+                else:
+                    sub = sub[~sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
 
             if view_mode == "기관별" and selected_org is not None:
                 sub = sub[sub["기관명"] == selected_org]
@@ -3152,26 +1332,22 @@ def main() -> None:
     else:
         analysis_year_to_raw = year_to_raw
 
-    # 📊 대시보드 탭
+    # 📊 대시보드 탭 (요구사항 4, 6: 소비량과 생산량 모두 동일한 구조·차트·피드백 인터페이스로 렌더링)
     with tab_dashboard:
         if selected_year is None:
             st.info(
                 "아직 분석 가능한 df_raw 데이터가 없습니다. "
                 "먼저 '📂 에너지 사용량 파일 업로드' 탭에서 연도별 파일을 업로드해 주세요."
             )
-        elif dashboard_view == "신재생에너지 생산량 대시보드":
-            render_renewable_dashboard(
-                year_to_file, selected_year,
-                selected_org if view_mode == "기관별" else None,
-            )
         else:
             render_dashboard_tab(
-                spec,
-                fmt_rules,
-                analysis_year_to_raw,
-                selected_year,
-                view_mode,
-                selected_org,
+                spec=spec,
+                fmt_rules=fmt_rules,
+                analysis_year_to_raw=analysis_year_to_raw,
+                selected_year=selected_year,
+                view_mode=view_mode,
+                selected_org=selected_org,
+                is_production=is_production,
             )
 
     # 📂 업로드 탭
@@ -3186,8 +1362,5 @@ def main() -> None:
             render_debug_tab(year_to_raw, df_raw_all)
 
 
-# ===========================================================
-# 엔트리 포인트
-# ===========================================================
 if __name__ == "__main__":
     main()
