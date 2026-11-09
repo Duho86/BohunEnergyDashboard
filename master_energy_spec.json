@@ -1,6 +1,8 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "meta": {
+    "project_title": "Bohun Energy Dashboard(보훈공단 에너지 관리)",
+    "engine_family": "ARGON",
     "description": "보훈공단 에너지 사용량·온실가스 분석을 위한 통합 JSON 사양. 엑셀에서 추출한 schema/formulas/raw data/rules와 출력 형식(data_1, data_2, data_3)에 대한 정의를 모두 포함한다.",
     "notes": [
       "1. data_(백데이터)20xx년.json : 프로그램 구동 시 업로드하는 에너지 사용량 데이터, 이 형식의 업로드 파일이 계산에 활용되는 것",
@@ -10,6 +12,49 @@
     "current_year": 2024,
     "analysis_years": [2021, 2022, 2023, 2024],
     "ndc_target_rate": 0.0417
+  },
+
+  "energy_source_filters": {
+    "consumption_sources": ["전기", "도시가스", "지역난방", "유류", "유류(경유/등유)", "경유", "등유", "상수도"],
+    "production_sources": ["태양광", "지열"],
+    "exclude_from_consumption": ["태양광", "지열"],
+    "exclude_from_production": ["전기", "도시가스", "지역난방", "유류", "유류(경유/등유)", "경유", "등유", "상수도"]
+  },
+
+  "default_conversion_settings": {
+    "energy_kwh_per_unit": {
+      "전기|kWh": 1.0,
+      "전기|MWh": 1000.0,
+      "도시가스|m3": 10.55,
+      "도시가스|Nm3": 10.55,
+      "도시가스|천Nm3": 10550.0,
+      "도시가스|MJ": 0.2777777778,
+      "도시가스|Gcal": 1162.2222222222,
+      "지역난방|Gcal": 1162.2222222222,
+      "지역난방|MWh": 1000.0,
+      "지역난방|kWh": 1.0,
+      "태양광|kWh": 1.0,
+      "태양광|MWh": 1000.0,
+      "지열|kWh": 1.0,
+      "지열|MWh": 1000.0,
+      "지열|Gcal": 1162.2222222222
+    },
+    "emission_tco2_per_unit": {
+      "전기|kWh": 0.0004781,
+      "전기|MWh": 0.4781,
+      "도시가스|m3": 0.002176,
+      "도시가스|Nm3": 0.002176,
+      "도시가스|천Nm3": 2.176,
+      "도시가스|MJ": 0.0000561,
+      "도시가스|Gcal": 0.2348,
+      "지역난방|Gcal": 0.0387,
+      "지역난방|MWh": 0.0333,
+      "지역난방|kWh": 0.0000333
+    },
+    "avoided_tco2_per_kwh": {
+      "태양광": 0.0004781,
+      "지열": 0.0001960
+    }
   },
 
   "formatting_rules": {
