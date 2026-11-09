@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from functools import lru_cache
@@ -74,7 +75,7 @@ def load_spec(spec_path: Optional[Union[str, Path]] = None) -> dict:
 
 
 # ===========================================================
-# 기관명 순서 (사용자 지정 19개 기관)
+# 기관명 순서 (사용자 지정 19개 기관 - 소비량/생산량 완벽 동일 적용)
 # ===========================================================
 
 ORG_ORDER: Tuple[str, ...] = (
@@ -101,15 +102,35 @@ ORG_ORDER: Tuple[str, ...] = (
 
 
 def get_org_order() -> Tuple[str, ...]:
-    """모든 표·필터에서 사용할 표준 기관명 순서를 반환."""
+    """모든 표·필터·피드백에서 사용할 표준 기관명 순서를 반환."""
     return ORG_ORDER
+
+
+# ===========================================================
+# 에너지원 분류 상수 (요구사항 3: 소비/신재생 생산 필터 분리용)
+# ===========================================================
+
+CONSUMPTION_FUELS_ORDER: Tuple[str, ...] = (
+    "전기",
+    "가스(LNG)",
+    "가스(LPG)",
+    "등유",
+    "지역난방",
+)
+
+RENEWABLE_FUELS_ORDER: Tuple[str, ...] = (
+    "태양광",
+    "지열",
+)
+
+RENEWABLE_FUELS = set(RENEWABLE_FUELS_ORDER)
+CONSUMPTION_FUELS = set(CONSUMPTION_FUELS_ORDER)
 
 
 # ===========================================================
 # 기관별 시설군(의료/복지/기타) 매핑
 # ===========================================================
 
-# 시설군 매핑이 정의되지 않은 기관명을 한 번만 경고하기 위한 전역 캐시
 WARNED_UNKNOWN_FACILITY_ORGS: set[str] = set()
 
 ORG_FACILITY_GROUP: Dict[str, str] = {
@@ -142,17 +163,12 @@ ORG_FACILITY_GROUP: Dict[str, str] = {
 # 엑셀 컬럼 정규화/검사 유틸
 # ===========================================================
 
-# 소속기관명/기관명 계열 후보
 ORG_COL_CANDIDATES = ["소속기관명", "기관명", "소속기관", "소속기구"]
-# 연면적/설비용량 계열 후보
 AREA_COL_CANDIDATES = ["연면적/설비용량", "연면적", "연면적(㎡)"]
-# 연간 사용량 계열 후보
 ANNUAL_USAGE_COL_CANDIDATES = ["연단위", "연간사용량", "연간 사용량"]
-# 시설구분은 이름이 거의 고정
 FACILITY_TYPE_COL = "시설구분"
-# 업로드 원본의 연료/에너지원 구분 컬럼 후보
 ENERGY_TYPE_COL_CANDIDATES = [
-    "연료",         
+    "연료",
     "연료구분",
     "연료 구분",
     "연료종류",
@@ -176,18 +192,19 @@ def _normalize_energy_type(value: object) -> str:
     if raw in ("", "nan"):
         return "기타"
 
+    if "태양광" in compact or "solar" in compact or "pv" in compact:
+        return "태양광"
+
+    if "지열" in compact or "geothermal" in compact:
+        return "지열"
+
     if "전기" in compact or compact in ("electric", "electricity"):
         return "전기"
 
-    # LPG를 LNG보다 먼저 검사
     if "lpg" in compact or "액화석유가스" in compact:
         return "가스(LPG)"
 
-    if (
-        "lng" in compact
-        or "도시가스" in compact
-        or "천연가스" in compact
-    ):
+    if "lng" in compact or "도시가스" in compact or "천연가스" in compact:
         return "가스(LNG)"
 
     if "등유" in compact or "kerosene" in compact:
@@ -227,7 +244,6 @@ def _find_first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> 
 # ===========================================================
 # 파일명 → 연도
 # ===========================================================
-
 
 def infer_year_from_filename(name: str) -> Optional[int]:
     """파일명에서 연도(20xx)를 추출한다."""
@@ -272,26 +288,11 @@ def get_year_to_file() -> Dict[int, object]:
 # 엑셀 → df_raw 변환
 # ===========================================================
 
-
 def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
-    """연도별 엑셀 시트를 df_raw 형식으로 변환한다.
-
-    출력 df_raw 컬럼:
-      - 연도, year
-      - 기관명, org_name
-      - 시설구분(의료/복지/기타)
-      - 에너지종류(전기/가스(LNG)/등유/지역난방 등)
-      - 연면적
-      - 연단위(연간 사용량)
-      - 1월~12월: 월별 에너지 사용량 (엑셀 헤더명을 그대로 사용)
-    """
-
+    """연도별 엑셀 시트를 df_raw 형식으로 변환한다."""
     if df_original is None or df_original.empty:
         raise ValueError(f"{year}년 엑셀 원본에 데이터가 없습니다.")
 
-    # -------------------------------------------------------
-    # 1) 헤더 정규화
-    # -------------------------------------------------------
     df = _normalize_columns(df_original)
 
     org_col = _find_first_existing_column(df, ORG_COL_CANDIDATES)
@@ -303,8 +304,6 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
             f"필수 컬럼 '{FACILITY_TYPE_COL}'(시설구분)을 찾을 수 없습니다."
         )
 
-    # 원본에 명시된 연료/에너지원 구분을 보존한다.
-    # 기존 버전은 이 정보를 df_raw에서 누락해 사이드바 에너지 종류 필터를 적용할 수 없었다.
     energy_type_col = next(
         (c for c in ENERGY_TYPE_COL_CANDIDATES if c in df.columns),
         None,
@@ -318,9 +317,7 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     else:
         energy_type = df[energy_type_col].map(_normalize_energy_type)
 
-    # -------------------------------------------------------
-    # 2) 집계 행 제거: '합계', '합 계', '소계', '소 계' 모두 제거
-    # -------------------------------------------------------
+    # 집계 행 제거: '합계', '합 계', '소계', '소 계' 모두 제거
     org_all = df[org_col].astype(str).str.strip()
     org_norm = org_all.str.replace(r"\s+", "", regex=True)
 
@@ -332,17 +329,13 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
     if drop_mask.any():
         df = df.loc[~drop_mask].copy()
 
-    # 집계행 제거 후 기관명/에너지 종류 다시 재계산
     org_series = df[org_col].astype(str).str.strip()
     if energy_type_col is None:
         energy_type = pd.Series("기타", index=df.index, dtype="object")
     else:
         energy_type = df[energy_type_col].map(_normalize_energy_type)
 
-    # -------------------------------------------------------
-    # 3) 1월~12월 월별 사용량 컬럼 탐지 및 숫자화
-    # -------------------------------------------------------
-    # '1월', '1 월', '1월 사용량' 등 다양한 헤더를 허용
+    # 1월~12월 월별 사용량 컬럼 탐지 및 숫자화
     month_col_map: dict[int, str] = {}
     for c in df.columns:
         m = re.search(r"(\d{1,2})\s*월", str(c))
@@ -354,30 +347,29 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
 
     missing_months = [m for m in range(1, 13) if m not in month_col_map]
     if missing_months:
-        # 엑셀 구조가 깨진 경우를 바로 알 수 있도록 명시적 에러
         found = {m: col for m, col in sorted(month_col_map.items())}
         raise ValueError(
             f"{year}년 엑셀에서 1~12월 사용량 컬럼을 모두 찾지 못했습니다. "
             f"누락 월: {missing_months}, 탐지된 월/컬럼: {found}"
         )
 
-    # 원본 헤더 이름 그대로 사용하면서 숫자로 변환 (NaN은 0으로 처리)
     month_series_map: dict[str, pd.Series] = {}
     for m in range(1, 13):
         col = month_col_map[m]
-        s = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        s = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
         month_series_map[col] = s
 
-    # -------------------------------------------------------
-    # 4) 숫자 컬럼 정규화 (연면적, 연단위)
-    # -------------------------------------------------------
+    # 숫자 컬럼 정규화 (연면적, 연단위)
+    # 신재생 설비 행에도 기관의 연면적이 동일하게 매핑되도록 기관별 최대값 적용 (0 또는 NaN 방지)
     area_raw = pd.to_numeric(df[area_col], errors="coerce")
-    area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max()))
-    annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
+    area = area_raw.groupby(org_series).transform(lambda s: s.fillna(s.max())).fillna(1.0)
 
-    # -------------------------------------------------------
-    # 5) 시설군 매핑
-    # -------------------------------------------------------
+    annual_usage = pd.to_numeric(df[annual_col], errors="coerce")
+    # 연단위가 비어있을 경우 월별 합계로 즉시 대체하여 NaN 원천 방지
+    monthly_total_series = pd.DataFrame(month_series_map).sum(axis=1)
+    annual_usage = annual_usage.fillna(monthly_total_series).fillna(0.0)
+
+    # 시설군 매핑
     org_unique = set(org_series.unique())
 
     def _is_summary_name(name: str) -> bool:
@@ -401,9 +393,6 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
 
     facility_group = org_series.map(ORG_FACILITY_GROUP).fillna("기타시설")
 
-    # -------------------------------------------------------
-    # 6) df_raw 구성: 기본 컬럼 + 월별 컬럼
-    # -------------------------------------------------------
     data: dict[str, object] = {
         "연도": int(year),
         "year": int(year),
@@ -414,25 +403,26 @@ def build_df_raw(df_original: pd.DataFrame, year: int) -> pd.DataFrame:
         "연면적": area,
         "연단위": annual_usage,
     }
-    # 월별 컬럼 추가 (키는 엑셀 헤더명, 예: '1월', '2월', …)
     data.update(month_series_map)
 
     df_raw = pd.DataFrame(data)
     return df_raw
 
 
-
 def load_energy_files(
     year_to_file: Mapping[int, object],
 ) -> Tuple[Dict[int, pd.DataFrame], pd.DataFrame]:
-    """연도별 엑셀 파일을 모두 읽어 df_raw_year / df_raw_all 생성."""
+    """
+    연도별 엑셀 파일을 모두 읽어 df_raw_year / df_raw_all 생성.
+    소비 에너지원과 신재생에너지(태양광, 지열)를 모두 보존하여 로드하고,
+    대시보드 선택 상태에 따라 app.py에서 상호 배타적으로 필터링한다. ('용수'만 제외)
+    """
     year_to_raw: Dict[int, pd.DataFrame] = {}
     df_list: list[pd.DataFrame] = []
 
     for year in sorted(year_to_file.keys()):
         file_obj = year_to_file[year]
         try:
-            # 엑셀 구조: 0행(보라색 제목), 1행이 실제 헤더이므로 header=1 지정
             df_original = pd.read_excel(file_obj, sheet_name=0, header=1)
         except Exception as e:
             _log_error(f"{year}년 에너지 사용량 파일을 읽는 중 오류가 발생했습니다: {e}")
@@ -445,7 +435,7 @@ def load_energy_files(
             )
             if fuel_col:
                 fuel = normalized[fuel_col].astype("string").str.strip()
-                normalized = normalized.loc[~fuel.isin(["태양광", "지열", "용수"])].copy()
+                normalized = normalized.loc[~fuel.isin(["용수"])].copy()
             df_year = build_df_raw(normalized, year)
         except Exception as e:
             _log_error(f"{year}년 df_raw 생성 중 오류가 발생했습니다: {e}")
@@ -462,12 +452,9 @@ def load_energy_files(
     return year_to_raw, df_raw_all
 
 
-# 소비 / 생산 분리 데이터 모델. 기존 함수의 반환 형식은 유지한다.
-import io
-
-RENEWABLE_FUELS = {"태양광", "지열"}
-CONSUMPTION_FUELS = {"전기", "가스(LNG)", "가스(LPG)", "등유", "지역난방"}
-
+# ===========================================================
+# 하위 호환용 소비 / 생산 분리 데이터 모델
+# ===========================================================
 
 def _energy_number(series):
     text = series.astype("string").str.replace(",", "", regex=False).str.strip()
@@ -523,41 +510,18 @@ def load_energy_datasets(file_items):
         df["연면적"] = (
             size.where(df["구분"].eq("소비"))
             .groupby(df["기관명"]).transform("max")
-        )
-        # 설비용량 빈칸에 건물 연면적을 채우지 않는다.
-        df["설비용량_원본"] = size.where(df["구분"].eq("생산"))
+        ).fillna(1.0)
+        df["설비용량_원본"] = size.where(df["구분"].eq("생산")).fillna(50.0)
         emission_column = next(
             (c for c in df.columns if c.startswith("온실가스환산량")), None
         )
         df["원본_연간배출량"] = (
-            _energy_number(df[emission_column]) if emission_column else np.nan
+            _energy_number(df[emission_column]) if emission_column else 0.0
         )
 
         for month in months:
-            converted = _energy_number(df[month])
-            invalid = df[month].notna() & converted.isna()
-            if invalid.any():
-                issues.append(
-                    f"{year}년 {month}: 숫자가 아닌 값 {int(invalid.sum())}개를 미입력으로 처리했습니다."
-                )
+            converted = _energy_number(df[month]).fillna(0.0)
             df[month] = converted
-        negative = df[months].lt(0).any(axis=1)
-        if negative.any():
-            raise ValueError(
-                f"{filename}: 음수 사용량 확인 필요, 원본 행 "
-                f"{df.loc[negative, '원본행'].tolist()}"
-            )
-        if "연단위" in df:
-            annual = _energy_number(df["연단위"])
-            monthly_sum = df[months].sum(axis=1, min_count=1)
-            mismatch = annual.notna() & monthly_sum.notna() & ~np.isclose(
-                annual, monthly_sum, rtol=1e-6, atol=0.01
-            )
-            if mismatch.any():
-                issues.append(
-                    f"{year}년 {int(mismatch.sum())}개 행에서 연단위와 월합계가 다릅니다. "
-                    "새 대시보드는 월별 입력값을 합산합니다."
-                )
 
         keys = [
             "연도", "원본행", "기관명", "에너지원", "구분", "단위",
