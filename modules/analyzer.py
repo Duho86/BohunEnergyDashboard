@@ -648,6 +648,10 @@ def _factor_map(keys, values):
 
 def prepare_energy_metrics(df, settings):
     out = df.copy()
+    for column in ["수량", "설비용량_원본"]:
+        out[column] = pd.to_numeric(out[column], errors="coerce").to_numpy(
+            dtype="float64", na_value=np.nan
+        )
     for column in [
         "에너지_kWh", "배출량_tCO2eq", "감축추정_tCO2eq", "확인용량_kW",
     ]:
@@ -661,17 +665,17 @@ def prepare_energy_metrics(df, settings):
         configured = _factor_map(keys, config.get("energy_kwh_per_unit", {}))
         energy_factor = configured.combine_first(energy_factor)
         energy = group["수량"] * energy_factor
-        out.loc[group.index, "에너지_kWh"] = energy
+        out.loc[group.index, "에너지_kWh"] = energy.to_numpy(dtype="float64", na_value=np.nan)
         emissions = _factor_map(keys, config.get("emission_tco2_per_unit", {}))
         avoided = _factor_map(
             group["에너지원"], config.get("avoided_tco2_per_kwh", {})
         )
         out.loc[group.index, "배출량_tCO2eq"] = (
             group["수량"] * emissions
-        ).where(group["구분"].eq("소비"))
+        ).where(group["구분"].eq("소비")).to_numpy(dtype="float64", na_value=np.nan)
         out.loc[group.index, "감축추정_tCO2eq"] = (
             energy * avoided
-        ).where(group["구분"].eq("생산"))
+        ).where(group["구분"].eq("생산")).to_numpy(dtype="float64", na_value=np.nan)
 
         capacity_keys = group["기관명"] + "|" + group["에너지원"]
         units = capacity_keys.map(config.get("capacity_unit", {}))
@@ -681,7 +685,7 @@ def prepare_energy_metrics(df, settings):
         )
         out.loc[group.index, "확인용량_kW"] = group["설비용량_원본"].where(
             valid & group["설비용량_원본"].gt(0)
-        )
+        ).to_numpy(dtype="float64", na_value=np.nan)
     return out
 
 
