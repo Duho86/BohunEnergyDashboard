@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 DEFAULT_BASELINE_PATH = Path("data") / "baseline.json"
+DEFAULT_BASE_EMISSION_TCO2 = 42500.0
 
 
 def load_baseline_records(path: Path = DEFAULT_BASELINE_PATH) -> Dict[int, Dict[str, Any]]:
@@ -97,3 +98,27 @@ def get_baseline_map(records: Dict[int, Dict[str, Any]]) -> Dict[int, float]:
         except Exception:
             continue
     return baseline_map
+
+
+def get_safe_baseline_for_year(
+    year: int,
+    records: Optional[Dict[int, Dict[str, Any]]] = None,
+    ndc_rate: float = 0.0417,
+) -> float:
+    """
+    특정 연도의 기준배출량이 baseline.json에 없을 때도 NONE이 발생하지 않도록
+    직전 연도 기준배출량 또는 기본값으로부터 안전하게 산정하여 반환한다.
+    """
+    if records is None:
+        records = load_baseline_records()
+    bmap = get_baseline_map(records)
+
+    if year in bmap and bmap[year] > 0:
+        return bmap[year]
+
+    if bmap:
+        latest_year = max(bmap.keys())
+        year_diff = max(0, year - latest_year)
+        return round(bmap[latest_year] * ((1.0 - ndc_rate) ** year_diff), 2)
+
+    return DEFAULT_BASE_EMISSION_TCO2
