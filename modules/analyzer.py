@@ -625,3 +625,145 @@ def build_datal_tables(df_raw_all: pd.DataFrame):
     """
     return build_data1_tables(df_raw_all)
 
+
+
+# 소비 / 생산 대시보드 공통 분석
+def settings_for_year(settings, year):
+    """연도별 정책계수 재정의. 설비 용량 등 공통 설정도 사용할 수 있다."""
+    resolved = dict(settings)
+    for key, value in settings.get("by_year", {}).get(str(year), {}).items():
+        if isinstance(value, Mapping):
+            resolved[key] = {**resolved.get(key, {}), **value}
+        else:
+            resolved[key] = value
+    return resolved
+
+
+def _factor_map(keys, values):
+    mapped = pd.to_numeric(keys.map(values), errors="coerce")
+    if (mapped.dropna() < 0).any() or np.isinf(mapped.dropna()).any():
+        raise ValueError("환산계수는 유한한 0 이상의 숫자여야 합니다.")
+    return mapped
+
+
+def prepare_energy_metrics(df, settings):
+    out = df.copy()
+    for column in [
+        "에너지_kWh", "배출량_tCO2eq", "감축추정_tCO2eq", "확인용량_kW",
+    ]:
+        out[column] = np.nan
+    for year, group in out.groupby("연도"):
+        config = settings_for_year(settings, year)
+        keys = group["에너지원"] + "|" + group["단위"]
+        energy_factor = group["단위"].map({
+            "kWh": 1.0, "MWh": 1000.0, "Gcal": 1162.2222222222222,
+        })
+        configured = _factor_map(keys, config.get("energy_kwh_per_unit", {}))
+        energy_factor = configured.combine_first(energy_factor)
+        energy = group["수량"] * energy_factor
+        out.loc[group.index, "에너지_kWh"] = energy
+        emissions = _factor_map(keys, config.get("emission_tco2_per_unit", {}))
+        avoided = _factor_map(
+            group["에너지원"], config.get("avoided_tco2_per_kwh", {})
+        )
+        out.loc[group.index, "배출량_tCO2eq"] = (
+            group["수량"] * emissions
+        ).where(group["구분"].eq("소비"))
+        out.loc[group.index, "감축추정_tCO2eq"] = (
+            energy * avoided
+        ).where(group["구분"].eq("생산"))
+
+        capacity_keys = group["기관명"] + "|" + group["에너지원"]
+        units = capacity_keys.map(config.get("capacity_unit", {}))
+        valid = (
+            (group["에너지원"].eq("태양광") & units.eq("kW"))
+            | (group["에너지원"].eq("지열") & units.eq("kWth"))
+        )
+        out.loc[group.index, "확인용량_kW"] = group["설비용량_원본"].where(
+            valid & group["설비용량_원본"].gt(0)
+        )
+    return out
+
+
+def complete_total(df, column):
+    observed = df[df["수량"].notna()]
+    if observed.empty or observed[column].isna().any():
+        return np.nan
+    return float(observed[column].sum())
+
+
+def select_period(df, year, end_month):
+    return df[df["연도"].eq(year) & df["월"].le(end_month)].copy()
+
+
+def period_summary(df, year, end_month):
+    selected = select_period(df, year, end_month)
+    previous = select_period(df, year - 1, end_month)
+    total = complete_total(selected, "에너지_kWh")
+    prev_total = complete_total(previous, "에너지_kWh")
+    # 일부 기관/설비의 월 입력이 누락되면 증감률을 확정하지 않는다.
+    comparable = (
+        not selected.empty and not previous.empty
+        and selected["수량"].notna().all()
+        and previous["수량"].notna().all()
+    )
+    yoy = (
+        (total / prev_total - 1) * 100
+        if comparable and pd.notna(total) and pd.notna(prev_total) and prev_total > 0
+        else np.nan
+    )
+    rows = []
+    for (org, fuel), group in selected.groupby(["기관명", "에너지원"]):
+        amount = complete_total(group, "에너지_kWh")
+        equipment = group.drop_duplicates(["연도", "원본행"])
+        capacities = equipment["확인용량_kW"]
+        capacity = capacities.sum() if capacities.notna().all() else np.nan
+        rows.append({
+            "기관명": org, "에너지원": fuel, "에너지_kWh": amount,
+            "기여도_%": amount / total * 100
+            if pd.notna(total) and total > 0 else np.nan,
+            "확인용량_kW": capacity,
+            "등가운전시간_h": amount / capacity
+            if pd.notna(capacity) and capacity > 0
+            and group["수량"].notna().all() else np.nan,
+        })
+    ranking = pd.DataFrame(rows, columns=[
+        "기관명", "에너지원", "에너지_kWh", "기여도_%",
+        "확인용량_kW", "등가운전시간_h",
+    ]).sort_values("에너지_kWh", ascending=False)
+    return selected, total, yoy, ranking
+
+
+def integrated_electricity(consumption, production, year, end_month, settings):
+    config = settings_for_year(settings, year)
+    current_c = select_period(consumption, year, end_month)
+    current_p = select_period(production, year, end_month)
+    rows = []
+    for org, group in current_c.groupby("기관명"):
+        electric = complete_total(group[group["에너지원"].eq("전기")], "에너지_kWh")
+        solar_rows = current_p[
+            current_p["기관명"].eq(org) & current_p["에너지원"].eq("태양광")
+        ]
+        solar = complete_total(solar_rows, "에너지_kWh")
+        ratio = config.get("self_use_ratio", {}).get(f"{org}|태양광")
+        if ratio is not None and (
+            not isinstance(ratio, (int, float)) or not np.isfinite(ratio) or not 0 <= ratio <= 1
+        ):
+            raise ValueError(f"{org}: 자가소비 비율은 0~1이어야 합니다.")
+        self_used = solar * ratio if ratio is not None else np.nan
+        basis = config.get("consumption_basis", {}).get(org)
+        net = np.nan
+        status = "계량기준 또는 자가소비량 확인 필요"
+        if basis == "purchased":
+            net, status = electric, "구매전력 기준"
+        elif basis == "gross" and pd.notna(self_used) and pd.notna(electric):
+            if self_used <= electric:
+                net, status = electric - self_used, "총수요에서 자가소비 차감"
+            else:
+                status = "자가소비가 총수요보다 큼: 설정 확인"
+        rows.append({
+            "기관명": org, "전력소비_입력_kWh": electric,
+            "태양광_자가소비_kWh": self_used, "외부전력_필요량_kWh": net,
+            "계량기준": status,
+        })
+    return pd.DataFrame(rows)
