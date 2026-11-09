@@ -287,7 +287,7 @@ def render_pie_from_series(
 
 
 # ===========================================================
-# 📊 대시보드 탭 렌더링 (소비량 & 신재생 생산량 동일 구조·인터페이스)
+# 📊 대시보드 탭 렌더링 (소비량 / 신재생 생산량 동일 구조·명확한 구분)
 # ===========================================================
 def render_dashboard_tab(
     spec: dict,
@@ -299,23 +299,26 @@ def render_dashboard_tab(
     is_production: bool = False,
 ) -> None:
     """
-    요구사항 4, 6, 7 완벽 반영:
     에너지 소비량 대시보드와 신재생에너지 생산량 대시보드 모두
-    100% 동일한 인터페이스 배치, 차트(월별/연도별/반기별/분기별/원그래프),
+    동일한 인터페이스 배치, 차트(월별/연도별/반기별/분기별/원그래프),
     분석표(data_2), 피드백 표(data_3), 소속기구 순서(ORG_ORDER),
-    그리고 ARGON 엔진 기반 AI 제안 피드백 인터페이스로 렌더링한다.
+    그리고 ARGON 엔진 기반 AI 제안 피드백 인터페이스로 렌더링하되,
+    소비량과 생산량의 명칭·컬럼·피드백이 명확히 구분되도록 표시한다.
     """
+    metric_label = "신재생에너지 생산량" if is_production else "에너지 소비량"
+    short_label = "생산량" if is_production else "소비량"
+
     if not analysis_year_to_raw:
         st.info(
-            "선택된 조건에 해당하는 데이터가 없습니다. "
+            f"선택된 조건에 해당하는 {metric_label} 데이터가 없습니다. "
             "좌측 사이드바 필터를 조정하거나 '📂 에너지 사용량 파일 업로드' 탭에서 파일을 확인해 주세요."
         )
         return
 
     # ===========================================================
-    # 0. 에너지 사용량 추이 (소비량·생산량 동일 구조)
+    # 0. 추이 그래프 섹션 (소비량 / 생산량 명확히 구분)
     # ===========================================================
-    st.subheader("에너지 사용량 추이")
+    st.subheader(f"{metric_label} 추이")
 
     try:
         df_list = [
@@ -335,9 +338,9 @@ def render_dashboard_tab(
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
-        st.markdown("**월별 에너지 사용량 추이**")
+        st.markdown(f"**월별 {metric_label} 추이**")
         if df_all.empty or "연도" not in df_all.columns:
-            st.info("월별 그래프를 그릴 데이터가 없습니다.")
+            st.info(f"월별 {metric_label} 그래프를 그릴 데이터가 없습니다.")
         else:
             df_year = df_all[df_all["연도"] == selected_year].copy()
             month_info = []
@@ -363,11 +366,11 @@ def render_dashboard_tab(
                 st.line_chart(monthly)
 
     with col_g2:
-        st.markdown("**연도별 에너지 사용량 추이 (최대 5개년)**")
+        st.markdown(f"**연도별 {metric_label} 추이 (최대 5개년)**")
         if df_all.empty or "연도" not in df_all.columns:
-            st.info("연도별 그래프를 그릴 데이터가 없습니다.")
+            st.info(f"연도별 {metric_label} 그래프를 그릴 데이터가 없습니다.")
         elif "연단위" not in df_all.columns:
-            st.info("연단위 컬럼이 없어 연도별 에너지 사용량을 계산할 수 없습니다.")
+            st.info(f"연단위 컬럼이 없어 연도별 {metric_label}을(를) 계산할 수 없습니다.")
         else:
             yearly = (
                 df_all.groupby("연도", dropna=False)["연단위"]
@@ -376,12 +379,12 @@ def render_dashboard_tab(
                 .tail(5)
             )
             if yearly.empty:
-                st.info("연도별 에너지 사용량 합계를 계산할 수 없습니다.")
+                st.info(f"연도별 {metric_label} 합계를 계산할 수 없습니다.")
             else:
                 st.bar_chart(yearly)
 
     # ===========================================================
-    # 반기별 / 분기별 에너지 사용량 추이
+    # 반기별 / 분기별 추이
     # ===========================================================
     half_rows = []
     quarter_rows = []
@@ -429,9 +432,9 @@ def render_dashboard_tab(
     col_g3, col_g4 = st.columns(2)
 
     with col_g3:
-        st.markdown("**반기별 에너지 사용량 추이 (연도별 비교)**")
+        st.markdown(f"**반기별 {metric_label} 추이 (연도별 비교)**")
         if half_year_df.empty:
-            st.info("반기별 에너지 사용량을 계산할 데이터가 없습니다.")
+            st.info(f"반기별 {metric_label}을(를) 계산할 데이터가 없습니다.")
         elif not ALT_AVAILABLE:
             st.info("반기별 차트를 표시하려면 altair 패키지가 필요합니다.")
         else:
@@ -439,7 +442,7 @@ def render_dashboard_tab(
                 id_vars=["연도"],
                 value_vars=["상반기", "하반기"],
                 var_name="반기",
-                value_name="에너지 사용량",
+                value_name=metric_label,
             )
             half_chart_data["누적순서"] = half_chart_data["반기"].map({"상반기": 1, "하반기": 2})
             half_chart_data["연도"] = half_chart_data["연도"].astype(int).astype(str)
@@ -449,7 +452,7 @@ def render_dashboard_tab(
                 .mark_bar()
                 .encode(
                     x=alt.X("연도:N", title=None, sort=None, axis=alt.Axis(labelAngle=-90)),
-                    y=alt.Y("에너지 사용량:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
+                    y=alt.Y(f"{metric_label}:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
                     color=alt.Color(
                         "반기:N",
                         title=None,
@@ -460,7 +463,7 @@ def render_dashboard_tab(
                     tooltip=[
                         alt.Tooltip("연도:N", title="연도"),
                         alt.Tooltip("반기:N", title="구분"),
-                        alt.Tooltip("에너지 사용량:Q", title="에너지 사용량", format=",.0f"),
+                        alt.Tooltip(f"{metric_label}:Q", title=metric_label, format=",.0f"),
                     ],
                 )
                 .properties(height=300)
@@ -468,9 +471,9 @@ def render_dashboard_tab(
             st.altair_chart(half_chart, use_container_width=True)
 
     with col_g4:
-        st.markdown("**분기별 에너지 사용량 추이 (연도별 비교)**")
+        st.markdown(f"**분기별 {metric_label} 추이 (연도별 비교)**")
         if quarter_year_df.empty:
-            st.info("분기별 에너지 사용량을 계산할 데이터가 없습니다.")
+            st.info(f"분기별 {metric_label}을(를) 계산할 데이터가 없습니다.")
         elif not ALT_AVAILABLE:
             st.info("분기별 차트를 표시하려면 altair 패키지가 필요합니다.")
         else:
@@ -478,7 +481,7 @@ def render_dashboard_tab(
                 id_vars=["연도"],
                 value_vars=["1분기", "2분기", "3분기", "4분기"],
                 var_name="분기",
-                value_name="에너지 사용량",
+                value_name=metric_label,
             )
             quarter_chart_data["누적순서"] = quarter_chart_data["분기"].map(
                 {"1분기": 1, "2분기": 2, "3분기": 3, "4분기": 4}
@@ -490,7 +493,7 @@ def render_dashboard_tab(
                 .mark_bar()
                 .encode(
                     x=alt.X("연도:N", title=None, sort=None, axis=alt.Axis(labelAngle=-90)),
-                    y=alt.Y("에너지 사용량:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
+                    y=alt.Y(f"{metric_label}:Q", title=None, stack="zero", axis=alt.Axis(format=",.0f")),
                     color=alt.Color(
                         "분기:N",
                         title=None,
@@ -501,7 +504,7 @@ def render_dashboard_tab(
                     tooltip=[
                         alt.Tooltip("연도:N", title="연도"),
                         alt.Tooltip("분기:N", title="구분"),
-                        alt.Tooltip("에너지 사용량:Q", title="에너지 사용량", format=",.0f"),
+                        alt.Tooltip(f"{metric_label}:Q", title=metric_label, format=",.0f"),
                     ],
                 )
                 .properties(height=300)
@@ -553,9 +556,9 @@ def render_dashboard_tab(
         comparison_year_to_raw[int(year)] = df_compare
 
     # ===========================================================
-    # 1. 에너지 사용량 분석 (data_2) - 소비/생산 동일 구조
+    # 1. 에너지 소비량 / 신재생 생산량 분석 (data_2)
     # ===========================================================
-    st.subheader("에너지 사용량 분석")
+    st.subheader(f"{metric_label} 분석")
 
     if comparison_end_month < 12:
         st.caption(
@@ -569,7 +572,7 @@ def render_dashboard_tab(
             current_year=selected_year,
         )
     except Exception as e:
-        st.error("에너지 사용량 분석(data_2) 계산 중 오류가 발생했습니다.")
+        st.error(f"{metric_label} 분석(data_2) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
@@ -610,7 +613,7 @@ def render_dashboard_tab(
         fmt_rules,
         {col: "percent_2" for col in fac_cols},
     ).T
-    fac_overall_fmt.columns = ["면적대비 에너지 사용비율"]
+    fac_overall_fmt.columns = [f"면적대비 {short_label} 비율"]
 
     df2_overall_fmt = format_table(data2_overall, fmt_rules, DATA2_OVERALL_FMT)
     for col in fac_cols:
@@ -619,6 +622,32 @@ def render_dashboard_tab(
 
     df2_by_org_fmt = format_table(data2_by_org, fmt_rules, DATA2_BYORG_FMT)
 
+    # 소비량 / 생산량 대시보드별 표 컬럼명 구분 표시
+    if is_production:
+        df2_overall_fmt = df2_overall_fmt.rename(columns={
+            "에너지 사용량(현재 기준)": "신재생 생산량(현재 기준)",
+            "3개년 평균 에너지 사용량 대비 증감률": "3개년 평균 생산량 대비 증감률",
+        })
+        df2_by_org_fmt = df2_by_org_fmt.rename(columns={
+            "에너지 사용량": "신재생 생산량",
+            "면적대비 에너지 사용비율": "면적대비 생산비율",
+            "에너지 사용 비중": "신재생 생산 비중",
+            "3개년 평균 에너지 사용량 대비 증감률": "3개년 평균 생산량 대비 증감률",
+            "시설별 평균 면적 대비 에너지 사용비율": "시설별 평균 면적 대비 생산비율",
+        })
+    else:
+        df2_overall_fmt = df2_overall_fmt.rename(columns={
+            "에너지 사용량(현재 기준)": "에너지 소비량(현재 기준)",
+            "3개년 평균 에너지 사용량 대비 증감률": "3개년 평균 소비량 대비 증감률",
+        })
+        df2_by_org_fmt = df2_by_org_fmt.rename(columns={
+            "에너지 사용량": "에너지 소비량",
+            "면적대비 에너지 사용비율": "면적대비 소비비율",
+            "에너지 사용 비중": "에너지 소비 비중",
+            "3개년 평균 에너지 사용량 대비 증감률": "3개년 평균 소비량 대비 증감률",
+            "시설별 평균 면적 대비 에너지 사용비율": "시설별 평균 면적 대비 소비비율",
+        })
+
     col1, col2 = st.columns([1.3, 1])
     with col1:
         suffix = f" ({selected_org})" if (view_mode == "기관별" and selected_org) else ""
@@ -626,7 +655,7 @@ def render_dashboard_tab(
         st.dataframe(df2_overall_fmt, use_container_width=True)
 
     with col2:
-        st.markdown("**시설구분별 면적대비 평균 에너지 사용비율**")
+        st.markdown(f"**시설구분별 면적대비 평균 {short_label} 비율**")
         if fac_overall_fmt is not None and not fac_overall_fmt.empty:
             st.dataframe(fac_overall_fmt, use_container_width=True)
         else:
@@ -635,19 +664,19 @@ def render_dashboard_tab(
     st.markdown("---")
 
     # ===========================================================
-    # 1-1. 소속기구별 원그래프
+    # 1-1. 소속기구별 원그래프 (소비량 / 생산량 구분 표시)
     # ===========================================================
-    st.markdown("**소속기구별 원그래프 (에너지 분석 부문)**")
+    st.markdown(f"**소속기구별 원그래프 ({metric_label} 분석 부문)**")
 
     if data2_by_org is None or data2_by_org.empty or len(data2_by_org.index) < 2:
         st.info("소속기구별 비교를 위한 데이터가 2개 미만입니다.")
     else:
         pie_metrics = [
-            ("에너지 사용량", "에너지 사용량", False),
-            ("면적대비 에너지 사용비율", "면적대비 에너지 사용비율", False),
-            ("에너지 사용 비중", "에너지 사용 비중", False),
-            ("3개년 평균 에너지 사용량 대비 증감률", "3개년 평균 에너지 사용량 대비 증감률", True),
-            ("시설별 평균 면적 대비 에너지 사용비율", "시설별 평균 면적 대비 에너지 사용비율", False),
+            (f"{metric_label}", "에너지 사용량", False),
+            (f"면적대비 {short_label} 비율", "면적대비 에너지 사용비율", False),
+            (f"{short_label} 비중", "에너지 사용 비중", False),
+            (f"3개년 평균 {short_label} 대비 증감률", "3개년 평균 에너지 사용량 대비 증감률", True),
+            (f"시설별 평균 면적 대비 {short_label} 비율", "시설별 평균 면적 대비 에너지 사용비율", False),
         ]
 
         for i in range(0, len(pie_metrics), 2):
@@ -673,9 +702,9 @@ def render_dashboard_tab(
     st.dataframe(df2_by_org_fmt, use_container_width=True)
 
     # ===========================================================
-    # 2. 피드백 (data_3) - 소비량 및 생산량 동일 인터페이스·순서
+    # 2. 피드백 (data_3) - 소비량 및 생산량 동일 인터페이스·순서·명칭 구분
     # ===========================================================
-    st.subheader("피드백")
+    st.subheader(f"{metric_label} 피드백")
 
     try:
         data3 = build_data_3_feedback(
@@ -683,11 +712,11 @@ def render_dashboard_tab(
             current_year=selected_year,
         )
     except Exception as e:
-        st.error("피드백(data_3) 계산 중 오류가 발생했습니다.")
+        st.error(f"{metric_label} 피드백(data_3) 계산 중 오류가 발생했습니다.")
         st.exception(e)
         return
 
-    # 실제 감축률 보정 (감축률 = -증감률)
+    # 실제 감축률/증감률 보정
     if (
         data3.overall is not None
         and not data3.overall.empty
@@ -700,7 +729,9 @@ def render_dashboard_tab(
                 errors="coerce",
             ).iloc[0]
             if not pd.isna(yoy_change):
-                data3.overall.loc[data3.overall.index[0], "전년대비 감축률"] = -float(yoy_change)
+                data3.overall.loc[data3.overall.index[0], "전년대비 감축률"] = (
+                    float(yoy_change) if is_production else -float(yoy_change)
+                )
 
         if "3개년 평균 에너지 사용량 대비 증감률" in data2_overall.columns:
             avg3_change = pd.to_numeric(
@@ -708,7 +739,9 @@ def render_dashboard_tab(
                 errors="coerce",
             ).iloc[0]
             if not pd.isna(avg3_change):
-                data3.overall.loc[data3.overall.index[0], "3개년 대비 감축률"] = -float(avg3_change)
+                data3.overall.loc[data3.overall.index[0], "3개년 대비 감축률"] = (
+                    float(avg3_change) if is_production else -float(avg3_change)
+                )
 
     DATA3_OVERALL_FMT = {
         "권장 에너지 사용량": "energy_kwh_int",
@@ -725,7 +758,7 @@ def render_dashboard_tab(
     df3_by_org = data3.by_org.copy()
     df3_detail = data3.detail.copy()
 
-    # 요구사항 6: 소속기구 순서(ORG_ORDER) 완벽 동일 정렬
+    # 소속기구 순서(ORG_ORDER) 완벽 동일 정렬
     if view_mode == "공단 전체":
         df3_by_org = df3_by_org.reindex(org_order)
         df3_detail = df3_detail.reindex(org_order)
@@ -743,13 +776,48 @@ def render_dashboard_tab(
 
     df3_by_org_fmt = format_table(df3_by_org, fmt_rules, DATA3_BYORG_FMT)
 
+    if is_production:
+        df3_overall_fmt = df3_overall_fmt.rename(columns={
+            "권장 에너지 사용량": "목표 신재생 생산량",
+            "전년대비 감축률": "전년대비 발전 증감률",
+            "3개년 대비 감축률": "3개년 대비 발전 증감률",
+        })
+        df3_by_org_fmt = df3_by_org_fmt.rename(columns={
+            "사용 분포 순위": "생산 분포 순위",
+            "에너지 3개년 평균 증가 순위": "신재생 3개년 평균 증가 순위",
+            "평균 에너지 사용량(연면적 기준) 순위": "평균 생산량(연면적 기준) 순위",
+            "권장 에너지 사용량": "목표 신재생 생산량",
+            "권장 사용량 대비 에너지 사용 비율": "목표량 대비 생산 달성률",
+            "에너지 사용량 관리 대상": "신재생 설비 점검 대상",
+        })
+        df3_detail = df3_detail.rename(columns={
+            "면적대비 에너지 과사용": "면적대비 발전 비중 상위",
+            "에너지 사용량 급증(3개년 평균대비)": "신재생 발전량 변동(3개년 대비)",
+            "권장량 대비 에너지 사용량 매우 초과": "목표 발전량 대비 편차 발생",
+        })
+    else:
+        df3_overall_fmt = df3_overall_fmt.rename(columns={
+            "권장 에너지 사용량": "권장 에너지 소비량",
+        })
+        df3_by_org_fmt = df3_by_org_fmt.rename(columns={
+            "사용 분포 순위": "소비 분포 순위",
+            "에너지 3개년 평균 증가 순위": "소비량 3개년 평균 증가 순위",
+            "평균 에너지 사용량(연면적 기준) 순위": "평균 소비량(연면적 기준) 순위",
+            "권장 에너지 사용량": "권장 에너지 소비량",
+            "권장 사용량 대비 에너지 사용 비율": "권장량 대비 소비 비율",
+            "에너지 사용량 관리 대상": "에너지 소비량 관리 대상",
+        })
+
     st.markdown("**1. 공단 전체 기준**")
     st.dataframe(df3_overall_fmt, use_container_width=True)
-    st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
+    if is_production:
+        st.caption("* 과거 3개년 평균 발전 실적 및 K-RE100 목표 연계 기준")
+    else:
+        st.caption("* 온실가스감축목표(NDC) 연평균 감축률 4.17% 기준")
 
     if comparison_end_month < 12:
         st.caption(
-            f"* 전년대비 감축률 및 3개년 대비 감축률은 각 연도의 동일기간({comparison_period_label}) 사용실적을 기준으로 계산합니다."
+            f"* 전년대비 및 3개년 대비 지표는 각 연도의 동일기간({comparison_period_label}) 실적을 기준으로 계산합니다."
         )
 
     st.markdown("---")
@@ -758,10 +826,10 @@ def render_dashboard_tab(
     if df3_by_org is None or df3_by_org.empty or len(df3_by_org.index) < 2:
         st.info("순위 비교를 위한 데이터가 2개 미만입니다.")
     else:
-        st.markdown("**소속기구별 원그래프 (사용 분포 순위)**")
+        st.markdown(f"**소속기구별 원그래프 ({short_label} 분포 순위)**")
         rank_metrics = [
-            ("에너지 3개년 평균 증가 순위", "에너지 3개년 평균 증가 순위"),
-            ("평균 에너지 사용량(연면적 기준) 순위", "평균 에너지 사용량(연면적 기준) 순위"),
+            (f"{short_label} 3개년 평균 증가 순위", "에너지 3개년 평균 증가 순위"),
+            (f"평균 {short_label}(연면적 기준) 순위", "평균 에너지 사용량(연면적 기준) 순위"),
         ]
         cols = st.columns(2)
         for idx, (title_kor, col_name) in enumerate(rank_metrics):
@@ -770,38 +838,38 @@ def render_dashboard_tab(
                     rank_series = pd.to_numeric(df3_by_org[col_name], errors="coerce").dropna()
                     rank_series = rank_series[rank_series > 0]
                     if rank_series.empty:
-                        st.info(f"'{col_name}' 데이터가 없습니다.")
+                        st.info(f"'{title_kor}' 데이터가 없습니다.")
                     else:
                         max_rank = rank_series.max()
                         score = max_rank + 1 - rank_series
                         render_pie_from_series(score, title_kor, use_abs=False)
                 else:
-                    st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
+                    st.info(f"'{title_kor}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
     st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("**3. 에너지 사용량 관리 대상 상세**")
+    st.markdown(f"**3. {metric_label} {'설비 점검' if is_production else '관리'} 대상 상세**")
 
     if df3_detail is None or df3_detail.empty:
-        st.info("관리 대상 상세 데이터를 생성할 수 없습니다.")
+        st.info("상세 데이터를 생성할 수 없습니다.")
     else:
         st.dataframe(df3_detail, use_container_width=True)
 
     # ===========================================================
-    # 3. AI 제안 피드백 (요구사항 6, 7: 인터페이스 유지 + ARGON 엔진 전면 고도화)
+    # 3. AI 제안 피드백 (소비량 / 생산량 동일 인터페이스 + ARGON 엔진 고도화)
     # ===========================================================
     st.markdown("---")
-    st.subheader("AI 제안 피드백")
+    st.subheader(f"AI 제안 피드백 ({metric_label})")
     st.caption(f"⚙️ 구동 엔진: **{ARGON_ENGINE_VERSION}** (환산계수 및 다중 지표 자동 추론 활성화)")
 
     if comparison_end_month < 12:
         st.info(
             f"{selected_year}년 데이터는 **{comparison_period_label}**까지 입력되어 있습니다. "
-            f"AI 제안 피드백은 연간 사용량이 아닌 **각 연도의 동일기간({comparison_period_label}) 사용량을 기준으로 비교 분석**합니다."
+            f"AI 제안 피드백은 연간 총량이 아닌 **각 연도의 동일기간({comparison_period_label}) {short_label}을 기준으로 비교 분석**합니다."
         )
     else:
-        st.caption(f"{selected_year}년 전체 연도 데이터를 기준으로 분석합니다.")
+        st.caption(f"{selected_year}년 전체 연도 {metric_label} 데이터를 기준으로 분석합니다.")
 
     ai_data2_overall = data2_overall.copy()
     ai_data2_by_org = data2_by_org.copy()
@@ -823,7 +891,7 @@ def render_dashboard_tab(
         )
 
     # (종합분석)
-    st.markdown("#### (종합분석)")
+    st.markdown(f"#### (종합분석 - {metric_label})")
     global_text = generate_argon_global_feedback_text(
         selected_year=selected_year,
         df3_overall=data3.overall,
@@ -837,7 +905,7 @@ def render_dashboard_tab(
 
     # [소속기구별 맞춤형 피드백] - 소속기구 순서(ORG_ORDER) 완벽 동일
     st.markdown("---")
-    st.markdown("#### [소속기구별 맞춤형 피드백]")
+    st.markdown(f"#### [소속기구별 맞춤형 피드백 - {metric_label}]")
 
     if ai_data2_by_org is None or ai_data2_by_org.empty:
         st.info("소속기구별 피드백을 생성할 데이터가 없습니다.")
@@ -872,9 +940,12 @@ def render_dashboard_tab(
             st.markdown(inst_text)
             st.markdown("")
 
-    # [에너지 절감을 위한 공단 공통 제안]
+    # [공단 공통 제안]
     st.markdown("---")
-    st.markdown("#### [에너지 절감을 위한 공단 공통 제안]")
+    if is_production:
+        st.markdown("#### [신재생에너지 발전 효율 향상을 위한 공단 공통 제안]")
+    else:
+        st.markdown("#### [에너지 절감을 위한 공단 공통 제안]")
     st.markdown(
         generate_argon_common_recommendations_text(
             df3_by_org=ai_df3_by_org,
@@ -1037,11 +1108,11 @@ def render_upload_tab(
 
 
 # ===========================================================
-# 🔧 디버그 / 진단 탭 렌더링
+# 🔧 디버그 / 진단 탭 렌더링 (이스터에그 5회 클릭 토스트 완벽 복구)
 # ===========================================================
 def render_debug_tab(
     year_to_raw: Mapping[int, pd.DataFrame],
-    df_raw_all: pd.DataFrame,
+    df_raw_all: Optional[pd.DataFrame],
 ) -> None:
     col_title, col_secret = st.columns([30, 1])
 
@@ -1055,36 +1126,49 @@ def render_debug_tab(
         if st.button("·", key="easter_egg_trigger", help=None):
             st.session_state["easter_egg_count"] += 1
             if st.session_state["easter_egg_count"] >= 5:
-                st.markdown(
-                    """
-                    <style>
-                    @keyframes easterEggFade {
-                        0% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); }
-                        10% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-                        85% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-                        100% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); visibility: hidden; }
-                    }
-                    .easter-egg-toast {
-                        position: fixed; top: 50%; left: 50%;
-                        transform: translate(-50%, -50%);
-                        z-index: 999999;
-                        background: rgba(35, 38, 45, 0.96);
-                        color: white;
-                        padding: 20px 32px; border-radius: 12px;
-                        font-size: 17px; font-weight: 600; text-align: center;
-                        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.40);
-                        white-space: nowrap;
-                        animation: easterEggFade 5s ease-in-out forwards;
-                        pointer-events: none;
-                    }
-                    </style>
-                    <div class="easter-egg-toast">
-                        ★짜☆잔★ 프로그램 제작자: 한국보훈복지의료공단 김두호 과장 ★짜☆잔★
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                st.session_state["show_easter_egg"] = True
                 st.session_state["easter_egg_count"] = 0
+
+    if st.session_state.get("show_easter_egg", False):
+        st.markdown(
+            """
+            <style>
+            @keyframes easterEggFade {
+                0% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); }
+                10% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                85% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                100% { opacity: 0; transform: translate(-50%, -50%) scale(0.95); visibility: hidden; }
+            }
+            .easter-egg-toast {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                z-index: 999999;
+                background: rgba(35, 38, 45, 0.96);
+                color: white;
+                padding: 20px 32px;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 600;
+                text-align: center;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.40);
+                white-space: nowrap;
+                animation: easterEggFade 5s ease-in-out forwards;
+                pointer-events: none;
+            }
+            </style>
+            <div class="easter-egg-toast">
+                ★짜☆잔★ 프로그램 제작자: 한국보훈복지의료공단 김두호 과장 ★짜☆잔★
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.session_state["show_easter_egg"] = False
+
+    if not year_to_raw or df_raw_all is None or df_raw_all.empty:
+        st.info("아직 df_raw 데이터가 없습니다.")
+        return
 
     years_available = sorted(year_to_raw.keys())
     st.write("로딩된 연도:", years_available)
@@ -1113,7 +1197,7 @@ def render_debug_tab(
 # 메인 함수
 # ===========================================================
 def main() -> None:
-    # 1. 제목 수정: Bohun Energy Dashboard(보훈공단 에너지 관리)
+    # 1. 제목: Bohun Energy Dashboard(보훈공단 에너지 관리) / 바로가기 링크 표시 삭제
     st.set_page_config(
         page_title="Bohun Energy Dashboard(보훈공단 에너지 관리)",
         layout="wide",
@@ -1121,40 +1205,13 @@ def main() -> None:
 
     st.title("Bohun Energy Dashboard(보훈공단 에너지 관리)")
 
-    # 대시보드 링크 영역 표시
-    st.markdown(
-        "🔗 **대시보드 바로가기 링크**: "
-        "[Bohun Energy Dashboard(보훈공단 에너지 관리)](https://bohunenergydashboard-yzi3axra3j7rlrscwqrnt6.streamlit.app/)"
+    # 라디오 버튼 상태 초기화 (실제 라디오 버튼 위젯은 아래 '📊 대시보드' 탭 내부 최상단에 위치)
+    if "dashboard_radio_mode" not in st.session_state:
+        st.session_state["dashboard_radio_mode"] = "에너지 소비량 대시보드"
+
+    is_production = (
+        st.session_state.get("dashboard_radio_mode") == "신재생에너지 생산량 대시보드"
     )
-
-    # 2. 배치 교정: 에너지 소비량 대시보드, 신재생에너지 생산량 대시보드 체크박스를 대시보드 링크 아래로 배치
-    if "active_dashboard_mode" not in st.session_state:
-        st.session_state["active_dashboard_mode"] = "consumption"
-
-    def _on_select_consumption():
-        st.session_state["active_dashboard_mode"] = "consumption"
-
-    def _on_select_production():
-        st.session_state["active_dashboard_mode"] = "production"
-
-    is_cons_mode = st.session_state["active_dashboard_mode"] == "consumption"
-    chk_col1, chk_col2, _ = st.columns([2.2, 2.5, 5.3])
-    with chk_col1:
-        st.checkbox(
-            "에너지 소비량 대시보드",
-            value=is_cons_mode,
-            key="chk_consumption_view",
-            on_change=_on_select_consumption,
-        )
-    with chk_col2:
-        st.checkbox(
-            "신재생에너지 생산량 대시보드",
-            value=not is_cons_mode,
-            key="chk_production_view",
-            on_change=_on_select_production,
-        )
-
-    is_production = st.session_state["active_dashboard_mode"] == "production"
 
     # -------------------------------------------------------
     # 0. spec 로딩
@@ -1204,7 +1261,7 @@ def main() -> None:
         years_available = []
 
     # -------------------------------------------------------
-    # 2. 사이드바 필터 (요구사항 3: 소비량/생산량 대시보드별 에너지 종류 상호 숨김)
+    # 2. 사이드바 필터 (소비량/생산량 대시보드 선택에 따라 에너지 종류 상호 분리)
     # -------------------------------------------------------
     with st.sidebar:
         st.header("필터")
@@ -1247,8 +1304,8 @@ def main() -> None:
             selected_org = None
             st.info("아직 분석 가능한 에너지 사용량 데이터가 없습니다.")
 
-        # 3. 에너지 소비량 대시보드 선택 시 신재생에너지(태양광, 지열) 안 보이도록 조치,
-        #    신재생에너지 생산량 대시보드 선택 시 소비 에너지원 안 보이도록 조치
+        # 에너지 소비량 대시보드 선택 시 신재생에너지(태양광, 지열) 숨김,
+        # 신재생에너지 생산량 대시보드 선택 시 소비 에너지원 숨김
         if is_production:
             allowed_order = list(RENEWABLE_FUELS_ORDER)
             excluded_set = set(CONSUMPTION_FUELS_ORDER) | {"기타", "용수"}
@@ -1291,49 +1348,52 @@ def main() -> None:
         )
 
     # -------------------------------------------------------
-    # 3. 탭 구성
+    # 3. 탭 구성 ("📊 대시보드 / 📂 에너지 사용량 파일 업로드 / 🔧 디버그 / 진단")
     # -------------------------------------------------------
     tab_dashboard, tab_upload, tab_debug = st.tabs(
         ["📊 대시보드", "📂 에너지 사용량 파일 업로드", "🔧 디버그 / 진단"]
     )
 
-    # 대시보드 모드(소비 vs 신재생 생산) 및 사이드바 필터를 모든 연도에 일관되게 적용
-    if year_to_raw:
-        filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
-        target_fuel_set = (
-            set(RENEWABLE_FUELS_ORDER)
-            if is_production
-            else (set(CONSUMPTION_FUELS_ORDER) | {"기타"})
-        )
-
-        for year, df in year_to_raw.items():
-            sub = df.copy()
-
-            # 모드별 에너지원 엄격 분리 (소비 대시보드에서는 태양광/지열 제외, 생산에서는 소비원 제외)
-            if "에너지종류" in sub.columns:
-                if is_production:
-                    sub = sub[sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
-                else:
-                    sub = sub[~sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
-
-            if view_mode == "기관별" and selected_org is not None:
-                sub = sub[sub["기관명"] == selected_org]
-
-            if selected_energy != "전체":
-                if "에너지종류" in sub.columns:
-                    sub = sub[sub["에너지종류"] == selected_energy]
-                else:
-                    sub = sub.iloc[0:0]
-
-            if not sub.empty:
-                filtered_year_to_raw[year] = sub
-
-        analysis_year_to_raw: Mapping[int, pd.DataFrame] = filtered_year_to_raw
-    else:
-        analysis_year_to_raw = year_to_raw
-
-    # 📊 대시보드 탭 (요구사항 4, 6: 소비량과 생산량 모두 동일한 구조·차트·피드백 인터페이스로 렌더링)
+    # 📊 대시보드 탭: 탭 바로 아래에 라디오 버튼을 배치하여 하나만 선택하도록 구성
     with tab_dashboard:
+        selected_mode = st.radio(
+            "대시보드 구분 선택",
+            ["에너지 소비량 대시보드", "신재생에너지 생산량 대시보드"],
+            horizontal=True,
+            key="dashboard_radio_mode",
+            label_visibility="collapsed",
+        )
+        is_production = (selected_mode == "신재생에너지 생산량 대시보드")
+
+        if year_to_raw:
+            filtered_year_to_raw: Dict[int, pd.DataFrame] = {}
+
+            for year, df in year_to_raw.items():
+                sub = df.copy()
+
+                # 모드별 에너지원 엄격 분리 (소비 대시보드에서는 태양광/지열 제외, 생산에서는 소비원 제외)
+                if "에너지종류" in sub.columns:
+                    if is_production:
+                        sub = sub[sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
+                    else:
+                        sub = sub[~sub["에너지종류"].isin(RENEWABLE_FUELS_ORDER)]
+
+                if view_mode == "기관별" and selected_org is not None:
+                    sub = sub[sub["기관명"] == selected_org]
+
+                if selected_energy != "전체":
+                    if "에너지종류" in sub.columns:
+                        sub = sub[sub["에너지종류"] == selected_energy]
+                    else:
+                        sub = sub.iloc[0:0]
+
+                if not sub.empty:
+                    filtered_year_to_raw[year] = sub
+
+            analysis_year_to_raw: Mapping[int, pd.DataFrame] = filtered_year_to_raw
+        else:
+            analysis_year_to_raw = year_to_raw
+
         if selected_year is None:
             st.info(
                 "아직 분석 가능한 df_raw 데이터가 없습니다. "
@@ -1354,12 +1414,9 @@ def main() -> None:
     with tab_upload:
         render_upload_tab(spec, fmt_rules, df_raw_all=df_raw_all)
 
-    # 🔧 디버그 탭
+    # 🔧 디버그 탭 (데이터 유무와 관계없이 5회 클릭 이스터에그 상시 작동)
     with tab_debug:
-        if not year_to_raw or df_raw_all is None:
-            st.info("아직 df_raw 데이터가 없습니다.")
-        else:
-            render_debug_tab(year_to_raw, df_raw_all)
+        render_debug_tab(year_to_raw, df_raw_all)
 
 
 if __name__ == "__main__":
