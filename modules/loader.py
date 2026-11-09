@@ -453,3 +453,122 @@ def load_energy_files(
         df_raw_all = pd.DataFrame()
 
     return year_to_raw, df_raw_all
+
+
+# 소비 / 생산 분리 데이터 모델. 기존 함수의 반환 형식은 유지한다.
+import io
+
+RENEWABLE_FUELS = {"태양광", "지열"}
+CONSUMPTION_FUELS = {"전기", "가스(LNG)", "가스(LPG)", "등유", "지역난방"}
+
+
+def _energy_number(series):
+    text = series.astype("string").str.replace(",", "", regex=False).str.strip()
+    return pd.to_numeric(text, errors="coerce").astype("float64")
+
+
+def load_energy_datasets(file_items):
+    """[(파일명, bytes)]에서 소비/생산 월별 테이블과 점검 메시지를 만든다."""
+    tables, issues, years = [], [], set()
+    unit_aliases = {
+        "kwh": "kWh", "mwh": "MWh", "gcal": "Gcal",
+        "㎥": "m3", "m³": "m3", "m3": "m3", "ℓ": "L", "l": "L",
+    }
+    for filename, content in file_items:
+        year = infer_year_from_filename(filename)
+        if year is None:
+            raise ValueError(f"{filename}: 파일명에 연도(20xx)가 필요합니다.")
+        if year in years:
+            raise ValueError(f"{year}년 파일이 중복되었습니다. 연도별 하나만 선택하세요.")
+        years.add(year)
+
+        df = pd.read_excel(io.BytesIO(content), sheet_name=0, header=1)
+        df.columns = [re.sub(r"\s+", "", str(c)) for c in df.columns]
+        if df.columns.duplicated().any():
+            raise ValueError(f"{filename}: 중복된 열 이름이 있습니다.")
+        months = [f"{m}월" for m in range(1, 13)]
+        required = {"소속기관명", "연료", "단위", "연면적/설비용량", *months}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"{filename}: 필수 열 누락 {sorted(missing)}")
+
+        df["원본행"] = df.index + 3
+        df["기관명"] = df["소속기관명"].astype("string").str.strip()
+        df["에너지원"] = df["연료"].astype("string").str.strip().replace({
+            "도시가스": "가스(LNG)", "LNG": "가스(LNG)", "LPG": "가스(LPG)",
+        })
+        valid = (
+            df["기관명"].notna() & df["기관명"].ne("")
+            & ~df["기관명"].str.contains(r"합\s*계|소\s*계", na=False)
+        )
+        df = df.loc[valid].copy()
+        supported = CONSUMPTION_FUELS | RENEWABLE_FUELS
+        excluded = sorted(set(df["에너지원"].dropna()) - supported)
+        if excluded:
+            issues.append(f"{year}년 에너지 집계 제외 항목: {', '.join(excluded)}")
+        df = df[df["에너지원"].isin(supported)].copy()
+        df["구분"] = np.where(df["에너지원"].isin(RENEWABLE_FUELS), "생산", "소비")
+        df["연도"] = year
+        raw_unit = df["단위"].astype("string").str.strip()
+        df["단위"] = raw_unit.str.lower().map(unit_aliases).fillna(raw_unit)
+
+        size = _energy_number(df["연면적/설비용량"])
+        df["연면적"] = (
+            size.where(df["구분"].eq("소비"))
+            .groupby(df["기관명"]).transform("max")
+        )
+        # 설비용량 빈칸에 건물 연면적을 채우지 않는다.
+        df["설비용량_원본"] = size.where(df["구분"].eq("생산"))
+        emission_column = next(
+            (c for c in df.columns if c.startswith("온실가스환산량")), None
+        )
+        df["원본_연간배출량"] = (
+            _energy_number(df[emission_column]) if emission_column else np.nan
+        )
+
+        for month in months:
+            converted = _energy_number(df[month])
+            invalid = df[month].notna() & converted.isna()
+            if invalid.any():
+                issues.append(
+                    f"{year}년 {month}: 숫자가 아닌 값 {int(invalid.sum())}개를 미입력으로 처리했습니다."
+                )
+            df[month] = converted
+        negative = df[months].lt(0).any(axis=1)
+        if negative.any():
+            raise ValueError(
+                f"{filename}: 음수 사용량 확인 필요, 원본 행 "
+                f"{df.loc[negative, '원본행'].tolist()}"
+            )
+        if "연단위" in df:
+            annual = _energy_number(df["연단위"])
+            monthly_sum = df[months].sum(axis=1, min_count=1)
+            mismatch = annual.notna() & monthly_sum.notna() & ~np.isclose(
+                annual, monthly_sum, rtol=1e-6, atol=0.01
+            )
+            if mismatch.any():
+                issues.append(
+                    f"{year}년 {int(mismatch.sum())}개 행에서 연단위와 월합계가 다릅니다. "
+                    "새 대시보드는 월별 입력값을 합산합니다."
+                )
+
+        keys = [
+            "연도", "원본행", "기관명", "에너지원", "구분", "단위",
+            "연면적", "설비용량_원본", "원본_연간배출량",
+        ]
+        table = df.melt(
+            id_vars=keys, value_vars=months, var_name="월", value_name="수량"
+        )
+        table["월"] = table["월"].str.removesuffix("월").astype(int)
+        tables.append(table)
+
+    if not tables:
+        raise ValueError("읽을 엑셀 파일이 없습니다.")
+    combined = pd.concat(tables, ignore_index=True)
+    if combined.empty:
+        raise ValueError("분석 가능한 소비 또는 생산 행이 없습니다.")
+    return (
+        combined[combined["구분"].eq("소비")].copy(),
+        combined[combined["구분"].eq("생산")].copy(),
+        issues,
+    )
