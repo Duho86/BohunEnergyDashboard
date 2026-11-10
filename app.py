@@ -258,35 +258,36 @@ def render_pie_from_series(
     else:
         tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="값", format=",.2f"))
 
-    chart = (
-            alt.Chart(df)
-            .mark_arc()
-            .encode(
-                theta=alt.Theta(field="value", type="quantitative", stack=True),
-                color=alt.Color(
-                    field="범례",
-                    type="nominal",
-                    sort=alt.SortField(field="value", order="descending"),
-                    scale=alt.Scale(scheme="category20"),
-                    title="기관명",
-                    legend=alt.Legend(
-                        labelLimit=400,
-                        symbolLimit=100,
-                        orient="right",
-                        direction="vertical",
-                        columns=2,
-                        labelFontSize=11,
-                        titleFontSize=12,
-                    ),
+chart = (
+        alt.Chart(df)
+        .mark_arc()
+        .encode(
+            theta=alt.Theta(field="value", type="quantitative", stack=True),
+            color=alt.Color(
+                field="범례",
+                type="nominal",
+                sort=alt.SortField(field="value", order="descending"),
+                scale=alt.Scale(scheme="category20"),
+                title="기관명",
+                legend=alt.Legend(
+                    labelLimit=400,
+                    symbolLimit=100,
+                    orient="right",
+                    direction="vertical",
+                    columns=2,
+                    labelFontSize=11,
+                    titleFontSize=12,
                 ),
-                tooltip=tooltip_list,
-            )
-            .properties(
-                title=title,
-                height=400
-            )
+            ),
+            tooltip=tooltip_list,
         )
-        st.altair_chart(chart, use_container_width=True)
+        .properties(
+            title=title,
+            height=400
+        )
+    )
+
+    st.altair_chart(chart, use_container_width=True)
 
 
 # ===========================================================
