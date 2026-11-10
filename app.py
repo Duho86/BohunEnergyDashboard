@@ -189,7 +189,7 @@ def format_table(
 
 
 # ===========================================================
-# 원그래프(파이 차트) 유틸
+# 원그래프(파이 차트) 유틸 - Plotly 기반 (내/외부 지시선 라벨 + 1열 전체 범례)
 # ===========================================================
 def render_pie_from_series(
     series: pd.Series,
@@ -197,11 +197,11 @@ def render_pie_from_series(
     use_abs: bool = False,
     show_rate_in_legend: bool = False,
 ) -> None:
-    """기관별 값을 받아 원그래프(Altair)를 그린다."""
-    if not ALT_AVAILABLE:
-        st.info(f"'{title}' 원그래프를 표시하려면 altair 패키지가 필요합니다.")
-        return
-
+    """
+    기관별 값을 받아 원그래프를 그린다.
+    - 조각이 큰 경우 그래프 내부에 소속기구 표시, 작은 경우 지시선(선 표시)과 함께 외부에 표시
+    - 우측 범례는 1열(일렬)로 19개 기관이 잘리지 않도록 전체 출력
+    """
     if series is None or series.empty:
         st.info(f"{title}를(을) 표시할 데이터가 없습니다.")
         return
@@ -234,7 +234,6 @@ def render_pie_from_series(
 
     total_value = df["value"].sum()
     df["파이비중"] = (df["value"] / total_value) if total_value > 0 else 0.0
-
     df = df.sort_values("value", ascending=False).reset_index(drop=True)
 
     if show_rate_in_legend:
@@ -242,52 +241,67 @@ def render_pie_from_series(
             lambda row: f"{row['기관명']} ({row['actual_value'] * 100:+.2f}%)",
             axis=1,
         )
+        hover_tmpl = (
+            "<b>%{customdata[0]}</b><br>"
+            "증감률: %{customdata[1]:+.2%}<br>"
+            "비중: %{percent}<extra></extra>"
+        )
     else:
         df["범례"] = df.apply(
             lambda row: f"{row['기관명']} ({row['파이비중'] * 100:.2f}%)",
             axis=1,
         )
+        hover_tmpl = (
+            "<b>%{customdata[0]}</b><br>"
+            "값: %{customdata[1]:,.2f}<br>"
+            "비중: %{percent}<extra></extra>"
+        )
 
-    tooltip_list = [
-        alt.Tooltip("기관명:N", title="기관명"),
-        alt.Tooltip("파이비중:Q", title="비중", format=".2%"),
-    ]
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
 
-    if show_rate_in_legend:
-        tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="증감률", format="+.2%"))
-    else:
-        tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="값", format=",.2f"))
+        fig = go.Figure(
+            data=[
+                go.Pie(
+                    labels=df["범례"],
+                    values=df["value"],
+                    text=df["기관명"],
+                    textinfo="text",          # 그래프 위에는 소속기구명 표시
+                    textposition="auto",      # 큰 조각은 내부, 작은 조각은 지시선과 함께 외부 자동 표기
+                    insidetextorientation="horizontal",
+                    automargin=True,          # 외부 지시선 라벨이 잘리지 않도록 여백 자동 확보
+                    sort=False,
+                    direction="clockwise",
+                    marker=dict(colors=px.colors.qualitative.T10 + px.colors.qualitative.Set3),
+                    customdata=np.stack((df["기관명"], df["actual_value"]), axis=-1),
+                    hovertemplate=hover_tmpl,
+                )
+            ]
+        )
 
-    chart = (
-        alt.Chart(df)
-        .mark_arc()
-        .encode(
-            theta=alt.Theta(field="value", type="quantitative", stack=True),
-            color=alt.Color(
-                field="범례",
-                type="nominal",
-                sort=alt.SortField(field="value", order="descending"),
-                scale=alt.Scale(scheme="category20"),
-                title="기관명",
-                legend=alt.Legend(
-                    labelLimit=400,
-                    symbolLimit=100,
-                    orient="right",
-                    direction="vertical",
-                    columns=2,
-                    labelFontSize=11,
-                    titleFontSize=12,
-                ),
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=15)),
+            height=540,  # 19개 기관 범례가 1열로 잘리지 않고 모두 들어가는 높이 확보
+            margin=dict(t=55, b=40, l=30, r=190),
+            legend=dict(
+                title=dict(text="기관명", font=dict(size=12)),
+                orientation="v",      # 1열(세로 일렬) 배치
+                yanchor="middle",
+                y=0.5,
+                xanchor="left",
+                x=1.05,
+                font=dict(size=11),
+                tracegroupgap=2,
             ),
-            tooltip=tooltip_list,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
         )
-        .properties(
-            title=title,
-            height=400
-        )
-    )
 
-    st.altair_chart(chart, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    except ImportError:
+        st.info("원그래프 지시선 표기를 위해 plotly 패키지가 필요합니다.")
 
 
 # ===========================================================
