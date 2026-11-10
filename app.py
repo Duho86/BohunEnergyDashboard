@@ -284,7 +284,7 @@ def render_pie_from_series(
 
         fig.update_layout(
             title=dict(text=title, font=dict(size=15), x=0.0, y=0.98),
-            height=620,  # 19개 기관 범례가 스크롤바 없이 1열로 넉넉히 들어가는 높이
+            height=620,
             margin=dict(t=45, b=20, l=85, r=10),
             legend=dict(
                 title=dict(text="기관명", font=dict(size=12)),
@@ -292,9 +292,9 @@ def render_pie_from_series(
                 yanchor="top",
                 y=0.98,
                 xanchor="left",
-                x=0.68,  # 원그래프 우측 끝과 간격을 두어 지시선 라벨과 분리
+                x=0.68,
                 font=dict(size=11),
-                itemizing="constant",
+                itemsizing="constant",  # <- 오타 수정 완료 (itemizing -> itemsizing)
                 tracegroupgap=0,
             ),
             paper_bgcolor="rgba(0,0,0,0)",
