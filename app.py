@@ -258,7 +258,7 @@ def render_pie_from_series(
     else:
         tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="값", format=",.2f"))
 
-    chart = (
+chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
@@ -270,17 +270,21 @@ def render_pie_from_series(
                 scale=alt.Scale(scheme="category20"),
                 title="기관명",
                 legend=alt.Legend(
-                    labelLimit=350,
+                    labelLimit=400,            # 텍스트가 잘리지 않도록 한계 넓힘
                     symbolLimit=100,
                     orient="right",
                     direction="vertical",
-                    labelFontSize=12,
-                    titleFontSize=13,
+                    columns=2,                 # 범례를 2열로 나누어 표시 (공간 확보)
+                    labelFontSize=11,          # 폰트를 약간 줄임
+                    titleFontSize=12,
                 ),
             ),
             tooltip=tooltip_list,
         )
-        .properties(title=title)
+        .properties(
+            title=title,
+            height=400  # 전체 차트 높이를 강제로 늘려 하단 범례가 잘리지 않도록 함
+        )
     )
 
     st.altair_chart(chart, use_container_width=True)
