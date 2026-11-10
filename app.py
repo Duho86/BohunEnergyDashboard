@@ -258,7 +258,7 @@ def render_pie_from_series(
     else:
         tooltip_list.insert(1, alt.Tooltip("actual_value:Q", title="값", format=",.2f"))
 
-chart = (
+    chart = (
         alt.Chart(df)
         .mark_arc()
         .encode(
