@@ -557,11 +557,11 @@ def render_dashboard_tab(
     elif comparison_end_month == 6:
         comparison_period_label = "상반기"
     elif comparison_end_month == 9:
-        comparison_period_label = "1~3분기"
+        comparison_period_label = "1-3분기"
     elif comparison_end_month == 12:
         comparison_period_label = "연간"
     else:
-        comparison_period_label = f"1~{comparison_end_month}월 누계"
+        comparison_period_label = f"1-{comparison_end_month}월 누계"
 
     for year, source_df in analysis_year_to_raw.items():
         if source_df is None or source_df.empty:
