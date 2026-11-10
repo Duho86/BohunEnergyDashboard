@@ -329,13 +329,6 @@ def render_dashboard_tab(
     metric_label = "신재생에너지 생산량" if is_production else "에너지 소비량"
     short_label = "생산량" if is_production else "소비량"
 
-    #  표 텍스트(헤더 및 내용) 가운데 정렬을 위한 헬퍼 함수
-    def center_align(df):
-        if df is None or df.empty:
-            return df
-        return df.style.set_properties(**{'text-align': 'center'}).set_table_styles(
-            [{'selector': 'th', 'props': [('text-align', 'center')]}]
-        )
     if not analysis_year_to_raw:
         st.info(
             f"선택된 조건에 해당하는 {metric_label} 데이터가 없습니다. "
@@ -680,12 +673,12 @@ def render_dashboard_tab(
     with col1:
         suffix = f" ({selected_org})" if (view_mode == "기관별" and selected_org) else ""
         st.markdown(f"**1. 공단 전체 기준{suffix}**")
-        st.dataframe(center_align(df2_overall_fmt), use_container_width=True)
+        st.dataframe(df2_overall_fmt, use_container_width=True)
 
     with col2:
         st.markdown(f"**시설구분별 면적대비 평균 {short_label} 비율**")
         if fac_overall_fmt is not None and not fac_overall_fmt.empty:
-            st.dataframe(center_align(fac_overall_fmt), use_container_width=True)
+            st.dataframe(fac_overall_fmt, use_container_width=True)
         else:
             st.info("시설구분별 데이터가 없습니다.")
 
@@ -727,7 +720,7 @@ def render_dashboard_tab(
                         st.info(f"'{col_name}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
     st.markdown("---")
-    st.dataframe(center_align(df2_by_org_fmt), use_container_width=True)
+    st.dataframe(df2_by_org_fmt, use_container_width=True)
 
     # ===========================================================
     # 2. 피드백 (data_3) - 소비량 및 생산량 동일 인터페이스·순서·명칭 구분
@@ -837,7 +830,7 @@ def render_dashboard_tab(
         })
 
     st.markdown("**1. 공단 전체 기준**")
-    st.dataframe(center_align(df3_overall_fmt), use_container_width=True)
+    st.dataframe(df3_overall_fmt, use_container_width=True)
     if is_production:
         st.caption("* 과거 3개년 평균 발전 실적 및 K-RE100 목표 연계 기준")
     else:
@@ -874,7 +867,7 @@ def render_dashboard_tab(
                 else:
                     st.info(f"'{title_kor}' 컬럼이 없어 원그래프를 표시할 수 없습니다.")
 
-    st.dataframe(center_align(df3_by_org_fmt), use_container_width=True)
+    st.dataframe(df3_by_org_fmt, use_container_width=True)
 
     st.markdown("---")
     st.markdown(f"**3. {metric_label} {'설비 점검' if is_production else '관리'} 대상 상세**")
@@ -882,7 +875,7 @@ def render_dashboard_tab(
     if df3_detail is None or df3_detail.empty:
         st.info("상세 데이터를 생성할 수 없습니다.")
     else:
-        st.dataframe(center_align(df3_detail), use_container_width=True)
+        st.dataframe(df3_detail, use_container_width=True)
 
     # ===========================================================
     # 3. AI 제안 피드백 (소비량 / 생산량 동일 인터페이스 + ARGON 엔진 고도화)
