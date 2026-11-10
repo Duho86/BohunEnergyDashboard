@@ -257,7 +257,7 @@ def render_pie_from_series(
             "비중: %{percent}<extra></extra>"
         )
 
-try:
+    try:
         import plotly.graph_objects as go
         import plotly.express as px
 
@@ -271,7 +271,7 @@ try:
                     textposition="auto",      # 큰 조각은 내부, 작은 조각은 지시선과 함께 외부 표기
                     insidetextorientation="horizontal",
                     automargin=False,         # 라벨이 범례 높이를 압박해 스크롤이 생기는 현상 방지
-                    domain=dict(x=[0.0, 0.56], y=[0.06, 0.94]),  # 원그래프를 좌측 56% 영역에 고정 (범례 침범 원천 차단)
+                    domain=dict(x=[0.0, 0.56], y=[0.06, 0.94]),  # 원그래프를 좌측 56% 영역에 고정
                     textfont=dict(size=11),
                     sort=False,
                     direction="clockwise",
@@ -285,17 +285,17 @@ try:
         fig.update_layout(
             title=dict(text=title, font=dict(size=15), x=0.0, y=0.98),
             height=620,  # 19개 기관 범례가 스크롤바 없이 1열로 넉넉히 들어가는 높이
-            margin=dict(t=45, b=20, l=85, r=10),  # 좌측 지시선 여백 확보 및 상하 여백 최소화
+            margin=dict(t=45, b=20, l=85, r=10),
             legend=dict(
                 title=dict(text="기관명", font=dict(size=12)),
                 orientation="v",
                 yanchor="top",
                 y=0.98,
                 xanchor="left",
-                x=0.68,               # 원그래프 우측 끝(0.56)과 12% 간격을 두어 지시선 라벨과 완벽 분리
+                x=0.68,  # 원그래프 우측 끝과 간격을 두어 지시선 라벨과 분리
                 font=dict(size=11),
                 itemizing="constant",
-                tracegroupgap=0,      # 범례 항목 간 불필요한 간격을 없애 스크롤바 생성 방지
+                tracegroupgap=0,
             ),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
