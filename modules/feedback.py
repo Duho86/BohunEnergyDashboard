@@ -365,9 +365,11 @@ def generate_argon_institution_feedback_text(
             "const": "객실동·부대시설 리모델링 및 개보수 공사",
         },
     }
-
-    if org_name in ORG_CUSTOM_CONTEXT:
-        ctx = ORG_CUSTOM_CONTEXT[org_name]
+   
+org_clean = str(org_name).strip()
+    matched_key = next((k for k in ORG_CUSTOM_CONTEXT if k in org_clean), None)
+    if matched_key:
+        ctx = ORG_CUSTOM_CONTEXT[matched_key]
     elif fac_group == "의료시설" or "병원" in org_name:
         ctx = {
             "role": "의료시설",
