@@ -365,8 +365,8 @@ def generate_argon_institution_feedback_text(
             "const": "객실동·부대시설 리모델링 및 개보수 공사",
         },
     }
-   
-org_clean = str(org_name).strip()
+
+    org_clean = str(org_name).strip()
     matched_key = next((k for k in ORG_CUSTOM_CONTEXT if k in org_clean), None)
     if matched_key:
         ctx = ORG_CUSTOM_CONTEXT[matched_key]
